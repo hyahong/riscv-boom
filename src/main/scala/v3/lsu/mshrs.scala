@@ -282,8 +282,12 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
       .elsewhen (rpq.io.empty && !commit_line)
     {
       when (!rpq.io.enq.fire) {
-        state := s_mem_finish_1
-        finish_to_prefetch := enablePrefetching.B
+        when (req.uop.uopc === uopPREFETCH) {
+          state := s_meta_read
+        } .otherwise {
+          state := s_mem_finish_1
+          finish_to_prefetch := enablePrefetching.B
+        }
       }
     } .elsewhen (rpq.io.empty || (rpq.io.deq.valid && !drain_load)) {
       // io.commit_val is for the prefetcher. it tells the prefetcher that this line was correctly acquired

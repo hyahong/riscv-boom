@@ -321,7 +321,7 @@ class RegisterReadDecode(supportedUnits: SupportedFuncUnits)(implicit p: Paramet
 
   var dec_table = AluRRdDecode.table
   if (supportedUnits.jmp) dec_table ++= JmpRRdDecode.table
-  if (supportedUnits.mem) dec_table ++= MemRRdDecode.table
+  if (supportedUnits.mem) dec_table ++= MemRRdDecode.table // Is this really needed?
   if (supportedUnits.muld) dec_table ++= MulDivRRdDecode.table
   if (supportedUnits.csr) dec_table ++= CsrRRdDecode.table
   if (supportedUnits.fpu) dec_table ++= FpuRRdDecode.table

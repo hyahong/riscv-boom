@@ -449,9 +449,26 @@ object RoCCDecode extends DecodeConstants
   )
 }
 
-
-
-
+/**
+ * Extension Decode constants
+ */
+object ExtDecode extends DecodeConstants
+{
+                       //                                                                     frs3_en                        wakeup_delay
+                       //     is val inst?                                                    |  imm sel                     |    bypassable (aka, known/fixed latency)
+                       //     |  is fp inst?                                                  |  |     uses_ldq              |    |  is_br
+                       //     |  |  is single-prec                            rs1 regtype     |  |     |  uses_stq           |    |  |
+                       //     |  |  |                                         |       rs2 type|  |     |  |  is_amo          |    |  |
+                       //     |  |  |  micro-code            func unit        |       |       |  |     |  |  |  is_fence     |    |  |
+                       //     |  |  |  |            iq-type  |                |       |       |  |     |  |  |  |  is_fencei |    |  |  is breakpoint or ecall?
+                       //     |  |  |  |            |        |        dst     |       |       |  |     |  |  |  |  |  mem    |    |  |  |  is unique? (clear pipeline for it)
+                       //     |  |  |  |            |        |        regtype |       |       |  |     |  |  |  |  |  cmd    |    |  |  |  |  flush on commit
+                       //     |  |  |  |            |        |        |       |       |       |  |     |  |  |  |  |  |      |    |  |  |  |  |  csr cmd
+                       //     |  |  |  |            |        |        |       |       |       |  |     |  |  |  |  |  |      |    |  |  |  |  |  |
+  val table: Array[(BitPat, List[BitPat])] = Array(//        |        |       |       |       |  |     |  |  |  |  |  |      |    |  |  |  |  |  |
+    PREFETCH_R        -> List(Y, N, X, uopPREFETCH, IQT_MEM, FU_MEM , RT_X  , RT_FIX, RT_X  , N, IS_S, N, N, N, N, N, M_PFR, 0.U, N, N, N, N, N, CSR.N),
+  )
+}
 
 /**
  * IO bundle for the Decode unit
@@ -487,7 +504,13 @@ class DecodeUnit(implicit p: Parameters) extends BoomModule
 
   val inst = uop.inst
 
-  val cs = Wire(new CtrlSigs()).decode(inst, decode_table)
+  // Base or Extension
+  val cs_base = Wire(new CtrlSigs()).decode(inst, decode_table);
+  val cs_extension = Wire(new CtrlSigs()).decode(inst, ExtDecode.table);
+  val cs = Mux(cs_extension.legal, cs_extension, cs_base)
+  when (cs_extension.legal) {
+    printf ("[extension] inst: %x, debug inst: %x\n", uop.inst, uop.debug_inst)
+  }
 
   // Exception Handling
   io.csr_decode.inst := inst

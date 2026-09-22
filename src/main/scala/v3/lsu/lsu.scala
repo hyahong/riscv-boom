@@ -367,18 +367,19 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
   // First we determine what operations are waiting to execute.
   // These are the "can_fire"/"will_fire" signals
 
-  val will_fire_load_incoming  = Wire(Vec(memWidth, Bool()))
-  val will_fire_stad_incoming  = Wire(Vec(memWidth, Bool()))
-  val will_fire_sta_incoming   = Wire(Vec(memWidth, Bool()))
-  val will_fire_std_incoming   = Wire(Vec(memWidth, Bool()))
-  val will_fire_sfence         = Wire(Vec(memWidth, Bool()))
-  val will_fire_hella_incoming = Wire(Vec(memWidth, Bool()))
-  val will_fire_hella_wakeup   = Wire(Vec(memWidth, Bool()))
-  val will_fire_release        = Wire(Vec(memWidth, Bool()))
-  val will_fire_load_retry     = Wire(Vec(memWidth, Bool()))
-  val will_fire_sta_retry      = Wire(Vec(memWidth, Bool()))
-  val will_fire_store_commit   = Wire(Vec(memWidth, Bool()))
-  val will_fire_load_wakeup    = Wire(Vec(memWidth, Bool()))
+  val will_fire_load_incoming       = Wire(Vec(memWidth, Bool()))
+  val will_fire_prefetchr_incoming  = Wire(Vec(memWidth, Bool()))
+  val will_fire_stad_incoming       = Wire(Vec(memWidth, Bool()))
+  val will_fire_sta_incoming        = Wire(Vec(memWidth, Bool()))
+  val will_fire_std_incoming        = Wire(Vec(memWidth, Bool()))
+  val will_fire_sfence              = Wire(Vec(memWidth, Bool()))
+  val will_fire_hella_incoming      = Wire(Vec(memWidth, Bool()))
+  val will_fire_hella_wakeup        = Wire(Vec(memWidth, Bool()))
+  val will_fire_release             = Wire(Vec(memWidth, Bool()))
+  val will_fire_load_retry          = Wire(Vec(memWidth, Bool()))
+  val will_fire_sta_retry           = Wire(Vec(memWidth, Bool()))
+  val will_fire_store_commit        = Wire(Vec(memWidth, Bool()))
+  val will_fire_load_wakeup         = Wire(Vec(memWidth, Bool()))
 
   val exe_req = WireInit(VecInit(io.core.exe.map(_.req)))
   // Sfence goes through all pipes
@@ -438,6 +439,9 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
 
   // Can we fire a incoming load
   val can_fire_load_incoming = widthMap(w => exe_req(w).valid && exe_req(w).bits.uop.ctrl.is_load)
+
+  // Can we fire a prefetch.R
+  val can_fire_prefetchr_incoming = widthMap(w => exe_req(w).valid && exe_req(w).bits.uop.uopc === uopPREFETCH)
 
   // Can we fire an incoming store addrgen + store datagen
   val can_fire_stad_incoming = widthMap(w => exe_req(w).valid && exe_req(w).bits.uop.ctrl.is_sta
@@ -549,21 +553,27 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
     // Notes on performance
     //  - Prioritize releases, this speeds up cache line writebacks and refills
     //  - Store commits are lowest priority, since they don't "block" younger instructions unless stq fills up
-    will_fire_load_incoming (w) := lsu_sched(can_fire_load_incoming (w) , true , true , true , false) // TLB , DC , LCAM
-    will_fire_stad_incoming (w) := lsu_sched(can_fire_stad_incoming (w) , true , false, true , true)  // TLB ,    , LCAM , ROB
-    will_fire_sta_incoming  (w) := lsu_sched(can_fire_sta_incoming  (w) , true , false, true , true)  // TLB ,    , LCAM , ROB
-    will_fire_std_incoming  (w) := lsu_sched(can_fire_std_incoming  (w) , false, false, false, true)  //                 , ROB
-    will_fire_sfence        (w) := lsu_sched(can_fire_sfence        (w) , true , false, false, true)  // TLB ,    ,      , ROB
-    will_fire_release       (w) := lsu_sched(can_fire_release       (w) , false, false, true , false) //            LCAM
-    will_fire_hella_incoming(w) := lsu_sched(can_fire_hella_incoming(w) , true , true , false, false) // TLB , DC
-    will_fire_hella_wakeup  (w) := lsu_sched(can_fire_hella_wakeup  (w) , false, true , false, false) //     , DC
-    will_fire_load_retry    (w) := lsu_sched(can_fire_load_retry    (w) , true , true , true , false) // TLB , DC , LCAM
-    will_fire_sta_retry     (w) := lsu_sched(can_fire_sta_retry     (w) , true , false, true , true)  // TLB ,    , LCAM , ROB // TODO: This should be higher priority
-    will_fire_load_wakeup   (w) := lsu_sched(can_fire_load_wakeup   (w) , false, true , true , false) //     , DC , LCAM1
-    will_fire_store_commit  (w) := lsu_sched(can_fire_store_commit  (w) , false, true , false, false) //     , DC
+    will_fire_load_incoming       (w) := lsu_sched(can_fire_load_incoming       (w) , true , true , true , false) // TLB , DC , LCAM
+    will_fire_prefetchr_incoming  (w) := lsu_sched(can_fire_prefetchr_incoming  (w) , true , true , false, true)  // TLB , DC ,      , ROB
+    will_fire_stad_incoming       (w) := lsu_sched(can_fire_stad_incoming       (w) , true , false, true , true)  // TLB ,    , LCAM , ROB
+    will_fire_sta_incoming        (w) := lsu_sched(can_fire_sta_incoming        (w) , true , false, true , true)  // TLB ,    , LCAM , ROB
+    will_fire_std_incoming        (w) := lsu_sched(can_fire_std_incoming        (w) , false, false, false, true)  //                 , ROB
+    will_fire_sfence              (w) := lsu_sched(can_fire_sfence              (w) , true , false, false, true)  // TLB ,    ,      , ROB
+    will_fire_release             (w) := lsu_sched(can_fire_release             (w) , false, false, true , false) //            LCAM
+    will_fire_hella_incoming      (w) := lsu_sched(can_fire_hella_incoming      (w) , true , true , false, false) // TLB , DC
+    will_fire_hella_wakeup        (w) := lsu_sched(can_fire_hella_wakeup        (w) , false, true , false, false) //     , DC
+    will_fire_load_retry          (w) := lsu_sched(can_fire_load_retry          (w) , true , true , true , false) // TLB , DC , LCAM
+    will_fire_sta_retry           (w) := lsu_sched(can_fire_sta_retry           (w) , true , false, true , true)  // TLB ,    , LCAM , ROB // TODO: This should be higher priority
+    will_fire_load_wakeup         (w) := lsu_sched(can_fire_load_wakeup         (w) , false, true , true , false) //     , DC , LCAM1
+    will_fire_store_commit        (w) := lsu_sched(can_fire_store_commit        (w) , false, true , false, false) //     , DC
 
 
-    assert(!(exe_req(w).valid && !(will_fire_load_incoming(w) || will_fire_stad_incoming(w) || will_fire_sta_incoming(w) || will_fire_std_incoming(w) || will_fire_sfence(w))))
+    assert(!(exe_req(w).valid && !(will_fire_load_incoming(w) ||
+                                   will_fire_prefetchr_incoming(w) ||
+                                   will_fire_stad_incoming(w) ||
+                                   will_fire_sta_incoming(w) ||
+                                   will_fire_std_incoming(w) ||
+                                   will_fire_sfence(w))))
 
     when (will_fire_load_wakeup(w)) {
       block_load_mask(ldq_wakeup_idx)           := true.B
@@ -593,24 +603,26 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
     "SFENCE through hella interface not supported")
 
   val exe_tlb_uop = widthMap(w =>
-                    Mux(will_fire_load_incoming (w) ||
-                        will_fire_stad_incoming (w) ||
-                        will_fire_sta_incoming  (w) ||
-                        will_fire_sfence        (w)  , exe_req(w).bits.uop,
-                    Mux(will_fire_load_retry    (w)  , ldq_retry_e.bits.uop,
-                    Mux(will_fire_sta_retry     (w)  , stq_retry_e.bits.uop,
-                    Mux(will_fire_hella_incoming(w)  , NullMicroOp,
-                                                       NullMicroOp)))))
+                    Mux(will_fire_load_incoming       (w) ||
+                        will_fire_prefetchr_incoming  (w) ||
+                        will_fire_stad_incoming       (w) ||
+                        will_fire_sta_incoming        (w) ||
+                        will_fire_sfence              (w)  , exe_req(w).bits.uop,
+                    Mux(will_fire_load_retry          (w)  , ldq_retry_e.bits.uop,
+                    Mux(will_fire_sta_retry           (w)  , stq_retry_e.bits.uop,
+                    Mux(will_fire_hella_incoming      (w)  , NullMicroOp,
+                                                             NullMicroOp)))))
 
   val exe_tlb_vaddr = widthMap(w =>
-                    Mux(will_fire_load_incoming (w) ||
-                        will_fire_stad_incoming (w) ||
-                        will_fire_sta_incoming  (w)  , exe_req(w).bits.addr,
-                    Mux(will_fire_sfence        (w)  , exe_req(w).bits.sfence.bits.addr,
-                    Mux(will_fire_load_retry    (w)  , ldq_retry_e.bits.addr.bits,
-                    Mux(will_fire_sta_retry     (w)  , stq_retry_e.bits.addr.bits,
-                    Mux(will_fire_hella_incoming(w)  , hella_req.addr,
-                                                       0.U))))))
+                    Mux(will_fire_load_incoming       (w) ||
+                        will_fire_prefetchr_incoming  (w) ||
+                        will_fire_stad_incoming       (w) ||
+                        will_fire_sta_incoming        (w)  , exe_req(w).bits.addr,
+                    Mux(will_fire_sfence              (w)  , exe_req(w).bits.sfence.bits.addr,
+                    Mux(will_fire_load_retry          (w)  , ldq_retry_e.bits.addr.bits,
+                    Mux(will_fire_sta_retry           (w)  , stq_retry_e.bits.addr.bits,
+                    Mux(will_fire_hella_incoming      (w)  , hella_req.addr,
+                                                             0.U))))))
 
   val exe_sfence = WireInit((0.U).asTypeOf(Valid(new rocket.SFenceReq)))
   for (w <- 0 until memWidth) {
@@ -620,23 +632,25 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
   }
 
   val exe_size   = widthMap(w =>
-                   Mux(will_fire_load_incoming (w) ||
-                       will_fire_stad_incoming (w) ||
-                       will_fire_sta_incoming  (w) ||
-                       will_fire_sfence        (w) ||
-                       will_fire_load_retry    (w) ||
-                       will_fire_sta_retry     (w)  , exe_tlb_uop(w).mem_size,
-                   Mux(will_fire_hella_incoming(w)  , hella_req.size,
-                                                      0.U)))
+                   Mux(will_fire_load_incoming      (w) ||
+                       will_fire_prefetchr_incoming (w) ||
+                       will_fire_stad_incoming      (w) ||
+                       will_fire_sta_incoming       (w) ||
+                       will_fire_sfence             (w) ||
+                       will_fire_load_retry         (w) ||
+                       will_fire_sta_retry          (w)  , exe_tlb_uop(w).mem_size,
+                   Mux(will_fire_hella_incoming     (w)  , hella_req.size,
+                                                           0.U)))
   val exe_cmd    = widthMap(w =>
-                   Mux(will_fire_load_incoming (w) ||
-                       will_fire_stad_incoming (w) ||
-                       will_fire_sta_incoming  (w) ||
-                       will_fire_sfence        (w) ||
-                       will_fire_load_retry    (w) ||
-                       will_fire_sta_retry     (w)  , exe_tlb_uop(w).mem_cmd,
-                   Mux(will_fire_hella_incoming(w)  , hella_req.cmd,
-                                                      0.U)))
+                   Mux(will_fire_load_incoming      (w) ||
+                       will_fire_prefetchr_incoming (w) ||
+                       will_fire_stad_incoming      (w) ||
+                       will_fire_sta_incoming       (w) ||
+                       will_fire_sfence             (w) ||
+                       will_fire_load_retry         (w) ||
+                       will_fire_sta_retry          (w)  , exe_tlb_uop(w).mem_cmd,
+                   Mux(will_fire_hella_incoming     (w)  , hella_req.cmd,
+                                                           0.U)))
 
   val exe_passthr= widthMap(w =>
                    Mux(will_fire_hella_incoming(w)  , hella_req.phys,
@@ -656,6 +670,7 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
   dtlb.io.kill                      := exe_kill.reduce(_||_)
   dtlb.io.sfence                    := exe_sfence
 
+  // We don't set the xcpt about prefetch.*. zicbop does not demand handling exception
   // exceptions
   val ma_ld = widthMap(w => will_fire_load_incoming(w) && exe_req(w).bits.mxcpt.valid) // We get ma_ld in memaddrcalc
   val ma_st = widthMap(w => (will_fire_sta_incoming(w) || will_fire_stad_incoming(w)) && exe_req(w).bits.mxcpt.valid) // We get ma_ld in memaddrcalc
@@ -716,8 +731,11 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
 
     when (mem_xcpt_valids(w))
     {
-      assert(RegNext(will_fire_load_incoming(w) || will_fire_stad_incoming(w) || will_fire_sta_incoming(w) ||
-        will_fire_load_retry(w) || will_fire_sta_retry(w)))
+      assert(RegNext(will_fire_load_incoming(w) ||
+                     will_fire_stad_incoming(w) ||
+                     will_fire_sta_incoming(w) ||
+                     will_fire_load_retry(w) ||
+                     will_fire_sta_retry(w)))
       // Technically only faulting AMOs need this
       assert(mem_xcpt_uops(w).uses_ldq ^ mem_xcpt_uops(w).uses_stq)
       when (mem_xcpt_uops(w).uses_ldq)
@@ -754,7 +772,6 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
 
   val s0_executing_loads = WireInit(VecInit((0 until numLdqEntries).map(x=>false.B)))
 
-
   for (w <- 0 until memWidth) {
     dmem_req(w).valid := false.B
     dmem_req(w).bits.uop   := NullMicroOp
@@ -771,6 +788,10 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
 
       s0_executing_loads(ldq_incoming_idx(w)) := dmem_req_fire(w)
       assert(!ldq_incoming_e(w).bits.executed)
+    } .elsewhen (will_fire_prefetchr_incoming(w)) {
+      dmem_req(w).valid      := !exe_tlb_miss(w) && !exe_tlb_uncacheable(w)
+      dmem_req(w).bits.addr  := exe_tlb_paddr(w)
+      dmem_req(w).bits.uop   := exe_tlb_uop(w)
     } .elsewhen (will_fire_load_retry(w)) {
       dmem_req(w).valid      := !exe_tlb_miss(w) && !exe_tlb_uncacheable(w)
       dmem_req(w).bits.addr  := exe_tlb_paddr(w)
@@ -893,6 +914,7 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
   val stdf_killed = IsKilledByBranch(io.core.brupdate, io.core.fp_stdata.bits.uop)
 
   val fired_load_incoming  = widthMap(w => RegNext(will_fire_load_incoming(w) && !exe_req_killed(w)))
+  val fired_prefetchr_incoming = widthMap(w => RegNext(will_fire_prefetchr_incoming(w) && !exe_req_killed(w)))
   val fired_stad_incoming  = widthMap(w => RegNext(will_fire_stad_incoming(w) && !exe_req_killed(w)))
   val fired_sta_incoming   = widthMap(w => RegNext(will_fire_sta_incoming (w) && !exe_req_killed(w)))
   val fired_std_incoming   = widthMap(w => RegNext(will_fire_std_incoming (w) && !exe_req_killed(w)))
@@ -937,7 +959,6 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
     clr_bsy_rob_idx (w) := 0.U
     clr_bsy_brmask  (w) := 0.U
 
-
     when (fired_stad_incoming(w)) {
       clr_bsy_valid   (w) := mem_stq_incoming_e(w).valid           &&
                             !mem_tlb_miss(w)                       &&
@@ -945,6 +966,10 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
                             !IsKilledByBranch(io.core.brupdate, mem_stq_incoming_e(w).bits.uop)
       clr_bsy_rob_idx (w) := mem_stq_incoming_e(w).bits.uop.rob_idx
       clr_bsy_brmask  (w) := GetNewBrMask(io.core.brupdate, mem_stq_incoming_e(w).bits.uop)
+    } .elsewhen (fired_prefetchr_incoming(w)) {
+      clr_bsy_valid   (w) := true.B
+      clr_bsy_rob_idx (w) := mem_incoming_uop(w).rob_idx
+      clr_bsy_brmask  (w) := GetNewBrMask(io.core.brupdate, mem_incoming_uop(w))
     } .elsewhen (fired_sta_incoming(w)) {
       clr_bsy_valid   (w) := mem_stq_incoming_e(w).valid            &&
                              mem_stq_incoming_e(w).bits.data.valid  &&
@@ -1296,12 +1321,15 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
         ldq(io.dmem.nack(w).bits.uop.ldq_idx).bits.executed  := false.B
         nacking_loads(io.dmem.nack(w).bits.uop.ldq_idx) := true.B
       }
-        .otherwise
+        .elsewhen (io.dmem.nack(w).bits.uop.uses_stq)
       {
-        assert(io.dmem.nack(w).bits.uop.uses_stq)
         when (IsOlder(io.dmem.nack(w).bits.uop.stq_idx, stq_execute_head, stq_head)) {
           stq_execute_head := io.dmem.nack(w).bits.uop.stq_idx
         }
+      }
+        .otherwise
+      {
+        assert(io.dmem.nack(w).bits.uop.uopc === uopPREFETCH)
       }
     }
     // Handle the response

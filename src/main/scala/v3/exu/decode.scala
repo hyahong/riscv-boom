@@ -508,9 +508,6 @@ class DecodeUnit(implicit p: Parameters) extends BoomModule
   val cs_base = Wire(new CtrlSigs()).decode(inst, decode_table);
   val cs_extension = Wire(new CtrlSigs()).decode(inst, ExtDecode.table);
   val cs = Mux(cs_extension.legal, cs_extension, cs_base)
-  when (cs_extension.legal) {
-    printf ("[extension] inst: %x, debug inst: %x\n", uop.inst, uop.debug_inst)
-  }
 
   // Exception Handling
   io.csr_decode.inst := inst

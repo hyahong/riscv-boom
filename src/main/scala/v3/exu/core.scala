@@ -514,10 +514,6 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
     decode_units(w).io.interrupt_cause := csr.io.interrupt_cause
 
     dec_uops(w) := decode_units(w).io.deq.uop
-
-    when (dec_fire(w)) {
-      printf ("[%d][DEC -> RENAME] debug_pc: %d, uopc: %d, inst: %x, debug_inst: %x\n", debug_tsc_reg, dec_uops(w).debug_pc, dec_uops(w).uopc, dec_uops(w).inst, dec_uops(w).debug_inst)
-    }
   }
 
   //-------------------------------------------------------------

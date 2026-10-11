@@ -967,7 +967,7 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       clr_bsy_rob_idx (w) := mem_stq_incoming_e(w).bits.uop.rob_idx
       clr_bsy_brmask  (w) := GetNewBrMask(io.core.brupdate, mem_stq_incoming_e(w).bits.uop)
     } .elsewhen (fired_prefetchr_incoming(w)) {
-      clr_bsy_valid   (w) := true.B
+      clr_bsy_valid   (w) := !IsKilledByBranch(io.core.brupdate, mem_incoming_uop(w))
       clr_bsy_rob_idx (w) := mem_incoming_uop(w).rob_idx
       clr_bsy_brmask  (w) := GetNewBrMask(io.core.brupdate, mem_incoming_uop(w))
     } .elsewhen (fired_sta_incoming(w)) {

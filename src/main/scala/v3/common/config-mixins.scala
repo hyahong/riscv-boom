@@ -248,7 +248,7 @@ class WithNMegaBooms(n: Int = 1) extends Config(
               fpu = Some(freechips.rocketchip.tile.FPUParams(sfmaLatency=4, dfmaLatency=4, divSqrt=true))
             ),
             dcache = Some(
-              DCacheParams(rowBits = 128, nSets=64, nWays=8, nMSHRs=8, nTLBWays=32)
+              DCacheParams(rowBits = 128, nSets=64, nWays=8, nMSHRs=16, nTLBWays=32)
             ),
             icache = Some(
               ICacheParams(rowBits = 128, nSets=64, nWays=8, fetchBytes=4*4)

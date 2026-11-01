@@ -23,6 +23,15 @@ import boom.v3.lsu._
 // BOOM Config Fragments
 // ---------------------
 
+class WithBoomSDM extends Config((site, here, up) => {
+  case TilesLocated(InSubsystem) => up(TilesLocated(InSubsystem), site) map {
+    case tp: BoomTileAttachParams => tp.copy(tileParams = tp.tileParams.copy(core = tp.tileParams.core.copy(
+      enableSDM = true
+    )))
+    case other => other
+  }
+})
+
 class WithBoomCommitLogPrintf extends Config((site, here, up) => {
   case TilesLocated(InSubsystem) => up(TilesLocated(InSubsystem), site) map {
     case tp: BoomTileAttachParams => tp.copy(tileParams = tp.tileParams.copy(core = tp.tileParams.core.copy(

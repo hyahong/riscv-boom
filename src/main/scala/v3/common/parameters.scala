@@ -57,6 +57,11 @@ case class BoomCoreParams(
   nPMPs: Int = 8,
   enableICacheDelay: Boolean = false,
 
+  /* software-defined manycore */
+  enableSDM: Boolean = false,
+  maxCoroContexts: Int = 32,
+  numCoroPCEntries: Int = 8,
+
   /* branch prediction */
   enableBranchPrediction: Boolean = true,
   branchPredictor: Function2[BranchPredictionBankResponse, Parameters, Tuple2[Seq[BranchPredictorBank], BranchPredictionBankResponse]] = ((resp_in: BranchPredictionBankResponse, p: Parameters) => (Nil, resp_in)),
@@ -107,6 +112,9 @@ case class BoomCoreParams(
 // DOC include end: BOOM Parameters
 ) extends freechips.rocketchip.tile.CoreParams
 {
+  require(isPow2(maxCoroContexts), "maxCoroContexts must be a power of 2")
+  require(isPow2(numCoroPCEntries), "numCoroPCEntries must be a power of 2")
+
   override def traceCustom = Some(new BoomTraceBundle)
   val xLen = 64
   val haveFSDirty = true
@@ -161,6 +169,12 @@ class BoomCustomCSRs(implicit p: Parameters) extends freechips.rocketchip.tile.C
 trait HasBoomCoreParameters extends freechips.rocketchip.tile.HasCoreParameters
 {
   val boomParams: BoomCoreParams = tileParams.core.asInstanceOf[BoomCoreParams]
+
+  //************************************
+  // Software-Defined Manycore
+  val enableSDM        = boomParams.enableSDM
+  val maxCoroContexts  = boomParams.maxCoroContexts
+  val numCoroPCEntries = boomParams.numCoroPCEntries
 
   //************************************
   // Superscalar Widths

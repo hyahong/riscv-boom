@@ -100,7 +100,8 @@ class FetchBuffer(implicit p: Parameters) extends BoomModule
 
       in_uops(i).sdm            := 0.U.asTypeOf(in_uops(i).sdm)
       if (enableSDM) {
-        in_uops(i).sdm.context  := io.enq.bits.context
+        in_uops(i).sdm.context    := io.enq.bits.context
+        in_uops(i).sdm.saved_tail := io.enq.bits.saved_tail(i)
       }
 
       in_mask(i)                := io.enq.valid && io.enq.bits.mask(i)

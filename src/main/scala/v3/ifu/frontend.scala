@@ -204,6 +204,7 @@ class FetchBundle(implicit p: Parameters) extends BoomBundle
 {
   val pc            = UInt(vaddrBitsExtended.W)
   val context       = new SDMContextTag
+  val saved_tail    = Vec(fetchWidth, Valid(UInt(coroPCBufferPtrBits.W)))
   val next_pc       = UInt(vaddrBitsExtended.W)
   val edge_inst     = Vec(nBanks, Bool()) // True if 1st instruction in this bundle is pc - 2
   val insts         = Vec(fetchWidth, Bits(32.W))
@@ -248,6 +249,25 @@ class FetchBundle(implicit p: Parameters) extends BoomBundle
   val fsrc    = UInt(BSRC_SZ.W)
   // Source of the prediction to this bundle
   val tsrc    = UInt(BSRC_SZ.W)
+
+  def setSavedTail(tail: UInt, transition_idx: Valid[UInt]): Unit = {
+    saved_tail := 0.U.asTypeOf(saved_tail)
+    if (enableSDM) {
+      val next_tail = Wire(UInt(coroPCBufferPtrBits.W))
+      next_tail := tail + 1.U
+
+      for (i <- 0 until fetchWidth) {
+        val is_transition = transition_idx.valid && transition_idx.bits === i.U
+        val is_branch = br_mask(i) ||
+          (cfi_idx.valid && cfi_idx.bits === i.U && cfi_type === CFI_JALR)
+
+        val valid = context.is_coro && mask(i) && (is_branch || is_transition)
+
+        saved_tail(i).valid := valid
+        saved_tail(i).bits := Mux(valid, Mux(is_transition, next_tail, tail), 0.U)
+      }
+    }
+  }
 }
 
 
@@ -591,6 +611,7 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
   f3_fetch_bundle.br_mask := f3_br_mask.asUInt
   f3_fetch_bundle.pc := f3_imemresp.pc
   f3_fetch_bundle.context := f3_imemresp.context
+  f3_fetch_bundle.saved_tail := 0.U.asTypeOf(f3_fetch_bundle.saved_tail)
   f3_fetch_bundle.ftq_idx := 0.U // This gets assigned later
   f3_fetch_bundle.xcpt_pf_if := f3_imemresp.xcpt.pf.inst
   f3_fetch_bundle.xcpt_ae_if := f3_imemresp.xcpt.ae.inst

@@ -139,6 +139,7 @@ class CommitSignals(implicit p: Parameters) extends BoomBundle
  */
 class CommitExceptionSignals(implicit p: Parameters) extends BoomBundle
 {
+  val context    = new SDMContextTag // context of the instruction (this PC)
   val ftq_idx    = UInt(log2Ceil(ftqSz).W)
   val edge_inst  = Bool()
   val is_rvc     = Bool()
@@ -568,10 +569,15 @@ class Rob(
 
   val refetch_inst = exception_thrown || insn_sys_pc2epc
   val com_xcpt_uop = PriorityMux(rob_head_vals, io.commit.uops)
+  io.com_xcpt.bits.context   := com_xcpt_uop.sdm.context
   io.com_xcpt.bits.ftq_idx   := com_xcpt_uop.ftq_idx
   io.com_xcpt.bits.edge_inst := com_xcpt_uop.edge_inst
   io.com_xcpt.bits.is_rvc    := com_xcpt_uop.is_rvc
   io.com_xcpt.bits.pc_lob    := com_xcpt_uop.pc_lob
+
+  if (enableSDM) {
+    assert(!(io.com_xcpt.valid && io.com_xcpt.bits.context.is_coro), "exceptions in a coroutine context are unsupported")
+  }
 
   val flush_commit_mask = Range(0,coreWidth).map{i => io.commit.valids(i) && io.commit.uops(i).flush_on_commit}
   val flush_commit = flush_commit_mask.reduce(_|_)
@@ -585,6 +591,7 @@ class Rob(
   // delay a cycle for critical path considerations
   io.flush.valid          := flush_val
   io.flush.bits           := DontCare
+  io.flush.bits.context   := flush_uop.sdm.context
   io.flush.bits.ftq_idx   := flush_uop.ftq_idx
   io.flush.bits.pc_lob    := flush_uop.pc_lob
   io.flush.bits.edge_inst := flush_uop.edge_inst

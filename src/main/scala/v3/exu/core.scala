@@ -400,9 +400,12 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
   //       ERETs are reported to the CSR two cycles before we send the flush
   //       Exceptions are reported to the CSR on the cycle we send the flush
   // This discrepency should be resolved elsewhere.
+  // Match the one-cycle delay of the flush PC metadata and redirect valid.
+  val flush_context = RegNext(rob.io.flush.bits.context)
   when (RegNext(rob.io.flush.valid)) {
     io.ifu.redirect_val   := true.B
     io.ifu.redirect_flush := true.B
+    if (enableSDM) io.ifu.redirect_context := flush_context
     val flush_typ = RegNext(rob.io.flush.bits.flush_typ)
     // Clear the global history when we flush the ROB (exceptions, AMOs, unique instructions, etc.)
     val new_ghist = WireInit((0.U).asTypeOf(new GlobalHistory))
@@ -436,6 +439,7 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
     io.ifu.redirect_pc      := mispredict_target
     io.ifu.redirect_flush   := true.B
     io.ifu.redirect_ftq_idx := brupdate.b2.uop.ftq_idx
+    if (enableSDM) io.ifu.redirect_context := brupdate.b2.uop.sdm.context
     val use_same_ghist = (brupdate.b2.cfi_type === CFI_BR &&
                           !brupdate.b2.taken &&
                           bankAlign(block_pc) === bankAlign(npc))

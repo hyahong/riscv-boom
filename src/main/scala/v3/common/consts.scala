@@ -261,6 +261,17 @@ trait ScalarOpConstants
   // Extension opcodes
   val uopPREFETCH  = 110.U(UOPC_SZ.W)
 
+  // SDM micro-ops depend on funct7
+  object uopSDM {
+    // prepare
+    val SET_FUNC  = 111.U(UOPC_SZ.W)
+    val SET_FRAME = 112.U(UOPC_SZ.W)
+    val SET_COUNT = 113.U(UOPC_SZ.W)
+    // excute
+    val RUN       = 114.U(UOPC_SZ.W)
+    val END       = 115.U(UOPC_SZ.W)
+  }
+
   // The Bubble Instruction (Machine generated NOP)
   // Insert (XOR x0,x0,x0) which is different from software compiler
   // generated NOPs which are (ADDI x0, x0, 0).

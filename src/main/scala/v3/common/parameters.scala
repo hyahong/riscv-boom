@@ -176,6 +176,12 @@ trait HasBoomCoreParameters extends freechips.rocketchip.tile.HasCoreParameters
   val maxCoroContexts  = boomParams.maxCoroContexts
   val numCoroPCEntries = boomParams.numCoroPCEntries
 
+  val coroIdxBits                = log2Ceil(maxCoroContexts)
+  val coroCountBits              = log2Ceil(maxCoroContexts + 1)
+  val coroFrameIndexBits         = coroCountBits // worker 0..N-1, host N.
+  val coroNumIntRegisters        = 32 // include x0 to simplify address calculation
+  val coroRegisterBytes          = 8
+
   //************************************
   // Superscalar Widths
 

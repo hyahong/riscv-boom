@@ -405,6 +405,33 @@ object FDivSqrtDecode extends DecodeConstants
 //scalastyle:on
 
 /**
+ * SDM initial decode
+ */
+object SDMDecode extends DecodeConstants
+{
+  private val noExecutionUnit = 0.U(FUC_SZ.W)
+
+  val table: Array[(BitPat, List[BitPat])] = Array(
+                               //                                                                                frs3_en                        wakeup_delay
+                               //                                                                                |  imm sel                     |  bypassable (aka, known/fixed latency)
+                               //                                                                                |  |     uses_ldq              |  |  is_br
+                               //     is val inst?                                                 rs1 regtype   |  |     |  uses_stq           |  |  |
+                               //     |  is fp inst?                                               |     rs2 type|  |     |  |  is_amo          |  |  |
+                               //     |  |  is dst single-prec?                                    |     |       |  |     |  |  |  is_fence     |  |  |
+                               //     |  |  |  micro-opcode                                        |     |       |  |     |  |  |  |  is_fencei |  |  |  is breakpoint or ecall
+                               //     |  |  |  |                    iq-type        func    dst     |     |       |  |     |  |  |  |  |  mem    |  |  |  |  is unique? (clear pipeline for it)
+                               //     |  |  |  |                    |              unit    regtype |     |       |  |     |  |  |  |  |  cmd    |  |  |  |  |  flush on commit
+                               //     |  |  |  |                    |              |       |       |     |       |  |     |  |  |  |  |  |      |  |  |  |  |  |  csr cmd
+    SDMInstructions.SET_FUNC  -> List(Y, N, N, uopSDM.SET_FUNC , IQT_INT, noExecutionUnit, RT_X, RT_FIX, RT_FIX, N, IS_X, N, N, N, N, N, M_X, 0.U, N, N, N, Y, Y, CSR.N),
+    SDMInstructions.SET_FRAME -> List(Y, N, N, uopSDM.SET_FRAME, IQT_INT, noExecutionUnit, RT_X, RT_FIX, RT_X  , N, IS_X, N, N, N, N, N, M_X, 0.U, N, N, N, Y, Y, CSR.N),
+    SDMInstructions.SET_COUNT -> List(Y, N, N, uopSDM.SET_COUNT, IQT_INT, noExecutionUnit, RT_X, RT_FIX, RT_X  , N, IS_X, N, N, N, N, N, M_X, 0.U, N, N, N, Y, Y, CSR.N),
+    SDMInstructions.RUN       -> List(Y, N, N, uopSDM.RUN      , IQT_INT, noExecutionUnit, RT_X, RT_X  , RT_X  , N, IS_X, N, N, N, N, N, M_X, 0.U, N, N, N, Y, Y, CSR.N),
+    // only the notify marked last by the controller gets unique/flush before dispatch
+    SDMInstructions.END       -> List(Y, N, N, uopSDM.END      , IQT_INT, noExecutionUnit, RT_X, RT_X  , RT_X  , N, IS_X, N, N, N, N, N, M_X, 0.U, N, N, N, N, N, CSR.N)
+  )
+}
+
+/**
  * RoCC initial decode
  */
 object RoCCDecode extends DecodeConstants
@@ -500,6 +527,7 @@ class DecodeUnit(implicit p: Parameters) extends BoomModule
   if (usingFPU) decode_table ++= FDecode.table
   if (usingFPU && usingFDivSqrt) decode_table ++= FDivSqrtDecode.table
   if (usingRoCC) decode_table ++= RoCCDecode.table
+  if (enableSDM) decode_table ++= SDMDecode.table
   decode_table ++= (if (xLen == 64) X64Decode.table else X32Decode.table)
 
   val inst = uop.inst

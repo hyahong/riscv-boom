@@ -28,6 +28,11 @@ class CoroPCBuffer(implicit p: Parameters) extends BoomModule
     // saved tail of the youngest committing instruction
     val commit_tail = Input(Valid(UInt(coroPCBufferPtrBits.W)))
 
+    // saved tail of the mispredicted branch
+    val rollback_tail = Input(Valid(UInt(coroPCBufferPtrBits.W)))
+    // flush restores the committed boundary
+    val flush         = Input(Bool())
+
     val target_cid = Input(UInt(coroIdxBits.W))
 
     val pc         = Output(UInt(vaddrBitsExtended.W))
@@ -61,8 +66,10 @@ class CoroPCBuffer(implicit p: Parameters) extends BoomModule
   val full      = head_idx === tail_idx && !same_wrap
 
   val pending   = head =/= forward_head
+  val recovering = io.flush || io.rollback_tail.valid
+  val next_forward_head = Mux(io.commit_tail.valid, io.commit_tail.bits, forward_head)
 
-  io.push.ready := !full && !io.init.valid && !reset.asBool
+  io.push.ready := !full && !recovering && !io.init.valid && !reset.asBool
   io.tail       := tail
 
   io.empty      := empty
@@ -90,7 +97,11 @@ class CoroPCBuffer(implicit p: Parameters) extends BoomModule
       head := head + 1.U
     }
 
-    when (io.push.fire) {
+    when (io.flush) {
+      tail := next_forward_head
+    } .elsewhen (io.rollback_tail.valid) {
+      tail := io.rollback_tail.bits
+    } .elsewhen (io.push.fire) {
       entries(tail_idx) := io.push.bits
       tail              := tail + 1.U
     }
@@ -100,7 +111,14 @@ class CoroPCBuffer(implicit p: Parameters) extends BoomModule
     // compare distances around the ring
     val advance = io.commit_tail.bits - forward_head
     val available = (tail - forward_head) + io.push.fire.asUInt
-    assert(advance <= available, "CoroPCBuffer commit tail must advance within the journal")
+    assert(advance <= available, "CoroPCBuffer commit tail must advance")
+  }
+
+  when (!reset.asBool && !io.init.valid && !io.flush && io.rollback_tail.valid) {
+    // branch may discard only the suffix after this cycle's committed boundary
+    val retained = io.rollback_tail.bits - next_forward_head
+    val speculative = tail - next_forward_head
+    assert(retained <= speculative, "CoroPCBuffer rollback tail must preserve the committed")
   }
 
   // latest entry selection

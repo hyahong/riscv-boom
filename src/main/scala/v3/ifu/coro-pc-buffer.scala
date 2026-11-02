@@ -25,6 +25,9 @@ class CoroPCBuffer(implicit p: Parameters) extends BoomModule
 
     val push       = Flipped(Decoupled(new CoroPCBufferEntry))
 
+    // saved tail of the youngest committing instruction
+    val commit_tail = Input(Valid(UInt(coroPCBufferPtrBits.W)))
+
     val target_cid = Input(UInt(coroIdxBits.W))
 
     val pc         = Output(UInt(vaddrBitsExtended.W))
@@ -57,6 +60,8 @@ class CoroPCBuffer(implicit p: Parameters) extends BoomModule
   val empty     = head === tail
   val full      = head_idx === tail_idx && !same_wrap
 
+  val pending   = head =/= forward_head
+
   io.push.ready := !full && !io.init.valid && !reset.asBool
   io.tail       := tail
 
@@ -69,11 +74,36 @@ class CoroPCBuffer(implicit p: Parameters) extends BoomModule
     head         := 0.U
     tail         := 0.U
     forward_head := 0.U
-  } .elsewhen (io.push.fire) {
-    entries(tail_idx) := io.push.bits
-    tail              := tail + 1.U
+  } .otherwise {
+    when (io.commit_tail.valid) {
+      forward_head := io.commit_tail.bits
+    }
+
+    // drain only the registered committed prefix, one entry per cycle
+    when (pending) {
+      if (maxCoroContexts == 1) {
+        base_pc(0) := entries(head_idx).pc
+      } else {
+        base_pc(entries(head_idx).cid) := entries(head_idx).pc
+      }
+      base_active := entries(head_idx).active
+      head := head + 1.U
+    }
+
+    when (io.push.fire) {
+      entries(tail_idx) := io.push.bits
+      tail              := tail + 1.U
+    }
   }
 
+  when (!reset.asBool && !io.init.valid && io.commit_tail.valid) {
+    // compare distances around the ring
+    val advance = io.commit_tail.bits - forward_head
+    val available = (tail - forward_head) + io.push.fire.asUInt
+    assert(advance <= available, "CoroPCBuffer commit tail must advance within the journal")
+  }
+
+  // latest entry selection
   val matched = VecInit((0 until numCoroPCEntries).map { i =>
     val live = Mux(same_wrap,
       i.U >= head_idx && i.U < tail_idx,
@@ -84,7 +114,7 @@ class CoroPCBuffer(implicit p: Parameters) extends BoomModule
     matched(i) && i.U < tail_idx
   }).asUInt
 
-  // select the latest range
+  // select the valid range
   val candidates = Mux(matched_before_tail.orR, matched_before_tail, matched)
 
   val newest = Reverse(PriorityEncoderOH(Reverse(candidates)))

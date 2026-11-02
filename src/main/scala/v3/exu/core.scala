@@ -378,6 +378,8 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
   io.ifu.redirect_val         := false.B
   io.ifu.redirect_flush       := false.B
 
+  io.ifu.redirect_context     := 0.U.asTypeOf(io.ifu.redirect_context)
+
   // Breakpoint info
   io.ifu.status  := csr.io.status
   io.ifu.bp      := csr.io.bp

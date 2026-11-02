@@ -281,14 +281,19 @@ trait ScalarOpConstants
 
   def NullMicroOp()(implicit p: Parameters): boom.v3.common.MicroOp = {
     val uop = Wire(new boom.v3.common.MicroOp)
-    uop            := DontCare // Overridden in the following lines
-    uop.uopc       := uopNOP // maybe not required, but helps on asserts that try to catch spurious behavior
-    uop.bypassable := false.B
-    uop.fp_val     := false.B
-    uop.uses_stq   := false.B
-    uop.uses_ldq   := false.B
-    uop.pdst       := 0.U
-    uop.dst_rtype  := RT_X
+    uop             := DontCare // Overridden in the following lines
+    uop.uopc        := uopNOP // maybe not required, but helps on asserts that try to catch spurious behavior
+
+    uop.is_internal := false.B
+
+    uop.sdm         := 0.U.asTypeOf(uop.sdm)
+
+    uop.bypassable  := false.B
+    uop.fp_val      := false.B
+    uop.uses_stq    := false.B
+    uop.uses_ldq    := false.B
+    uop.pdst        := 0.U
+    uop.dst_rtype   := RT_X
 
     val cs = Wire(new boom.v3.common.CtrlSignals())
     cs             := DontCare // Overridden in the following lines

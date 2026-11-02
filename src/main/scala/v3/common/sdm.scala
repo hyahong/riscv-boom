@@ -23,14 +23,20 @@ object SDMInstructions
 
 class SDMContextTag(implicit p: Parameters) extends BoomBundle
 {
-  val isCoro = Bool()
-  val cid = UInt(coroIdxBits.W) // maxCoroContexts=1 needs no index bit
+  val is_coro = Bool()
+  val cid     = UInt(coroIdxBits.W) // maxCoroContexts=1 needs no index bit
+}
+
+class SDMMicroOpMetadata(implicit p: Parameters) extends BoomBundle
+{
+  val context    = new SDMContextTag
+  val saved_tail = Valid(UInt(coroPCBufferPtrBits.W))
 }
 
 object SDMFrame
 {
   def index(context: SDMContextTag): UInt = {
-    Mux(context.isCoro,
+    Mux(context.is_coro,
       context.cid.pad(context.coroFrameIndexBits),
       context.maxCoroContexts.U(context.coroFrameIndexBits.W))
   }

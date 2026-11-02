@@ -95,6 +95,11 @@ class FetchBuffer(implicit p: Parameters) extends BoomModule
       val pc = (bankAlign(io.enq.bits.pc) + (i << 1).U)
 
       in_uops(i)                := DontCare
+
+      in_uops(i).is_internal    := false.B
+
+      in_uops(i).sdm            := 0.U.asTypeOf(in_uops(i).sdm)
+
       in_mask(i)                := io.enq.valid && io.enq.bits.mask(i)
       in_uops(i).edge_inst      := false.B
       in_uops(i).debug_pc       := pc

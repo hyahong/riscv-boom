@@ -352,6 +352,27 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       stq(st_enq_idx).bits.committed  := false.B
       stq(st_enq_idx).bits.succeeded  := false.B
 
+      // internal save can determine the physical address immediately after exp2
+      if (enableSDM) {
+        val uop = io.core.dis_uops(w).bits
+        when (uop.is_internal && uop.uopc === uopSTD && uop.lrs2_rtype === RT_FIX) {
+          val reg_idx = uop.lrs2(log2Ceil(coroNumIntRegisters) - 1, 0)
+          val addr = SDMFrame.address(io.core.coro_frame_base.bits, uop.sdm.context, reg_idx)
+
+          stq(st_enq_idx).bits.addr.valid := io.core.coro_frame_base.valid
+          stq(st_enq_idx).bits.addr.bits := addr
+          stq(st_enq_idx).bits.addr_is_virtual := false.B
+
+          assert(io.core.coro_frame_base.valid, "save requires a configured frame base")
+          assert(addr(2, 0) === 0.U && uop.mem_size === 3.U, "save must be an aligned 8-bytes store")
+          val full_addr = io.core.coro_frame_base.bits +& SDMFrame.offset(uop.sdm.context, reg_idx)
+          assert(!full_addr(corePAddrBits), "frame address exceeds the physical address width")
+          val legal = edge.manager.findSafe(addr).reduce(_||_)
+          assert(legal && edge.manager.fastProperty(addr, _.supportsPutFull.contains(coroRegisterBytes), (b: Boolean) => b.B),
+            "save frame must be writable physical memory")
+        }
+      }
+
       assert (st_enq_idx === io.core.dis_uops(w).bits.stq_idx, "[lsu] mismatch enq store tag.")
       assert (!stq(st_enq_idx).valid, "[lsu] Enqueuing uop is overwriting stq entries")
     }

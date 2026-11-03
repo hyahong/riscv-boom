@@ -118,7 +118,7 @@ class RobIo(
 class CommitSignals(implicit p: Parameters) extends BoomBundle
 {
   val valids      = Vec(retireWidth, Bool()) // These instructions may not correspond to an architecturally executed insn
-  val arch_valids = Vec(retireWidth, Bool())
+  val arch_valids = Vec(retireWidth, Bool()) // Excludes internal and predicated-off uops
   val uops        = Vec(retireWidth, new MicroOp())
   val fflags      = Valid(UInt(5.W))
 
@@ -412,7 +412,7 @@ class Rob(
     // use the same "com_uop" for both rollback AND commit
     // Perform Commit
     io.commit.valids(w) := will_commit(w)
-    io.commit.arch_valids(w) := will_commit(w) && !rob_predicated(com_idx)
+    io.commit.arch_valids(w) := will_commit(w) && !rob_predicated(com_idx) && !rob_uop(com_idx).is_internal
     io.commit.uops(w)   := rob_uop(com_idx)
     io.commit.debug_insts(w) := rob_debug_inst_rdata(w)
 

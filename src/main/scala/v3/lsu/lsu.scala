@@ -119,6 +119,8 @@ class LSUCoreIO(implicit p: Parameters) extends BoomBundle()(p)
 
   val fp_stdata   = Flipped(Decoupled(new ExeUnitResp(fLen)))
 
+  val coro_frame_base = Input(Valid(UInt(corePAddrBits.W)))
+
   val commit      = Input(new CommitSignals)
   val commit_load_at_rob_head = Input(Bool())
 
@@ -312,6 +314,31 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       ldq(ld_enq_idx).bits.order_fail      := false.B
       ldq(ld_enq_idx).bits.observed        := false.B
       ldq(ld_enq_idx).bits.forward_std_val := false.B
+
+      // internal restore can determine the physical address immediately after exp2
+      if (enableSDM) {
+        val uop = io.core.dis_uops(w).bits
+        when (uop.is_internal && uop.uopc === uopLD && uop.dst_rtype === RT_FIX) {
+          val reg_idx = uop.ldst(log2Ceil(coroNumIntRegisters) - 1, 0)
+          val addr = SDMFrame.address(io.core.coro_frame_base.bits, uop.sdm.context, reg_idx)
+          val legal = edge.manager.findSafe(addr).reduce(_||_)
+          // idk what this exactly means
+          val cacheable = legal && !usingDataScratchpad.B &&
+            edge.manager.fastProperty(addr, m => !m.supportsAcquireT.none, (b: Boolean) => b.B)
+
+          ldq(ld_enq_idx).bits.addr.valid := io.core.coro_frame_base.valid
+          ldq(ld_enq_idx).bits.addr.bits := addr
+          ldq(ld_enq_idx).bits.addr_is_virtual := false.B
+          ldq(ld_enq_idx).bits.addr_is_uncacheable := !cacheable
+
+          assert(io.core.coro_frame_base.valid, "restore requires a configured frame base")
+          assert(addr(2, 0) === 0.U && uop.mem_size === 3.U, "restore must be an aligned 8-bytes load")
+          val full_addr = io.core.coro_frame_base.bits +& SDMFrame.offset(uop.sdm.context, reg_idx)
+          assert(!full_addr(corePAddrBits), "frame address exceeds the physical address width")
+          assert(legal && edge.manager.fastProperty(addr, _.supportsGet.contains(coroRegisterBytes), (b: Boolean) => b.B),
+            "restore frame must be readable physical memory")
+        }
+      }
 
       assert (ld_enq_idx === io.core.dis_uops(w).bits.ldq_idx, "[lsu] mismatch enq load tag.")
       assert (!ldq(ld_enq_idx).valid, "[lsu] Enqueuing uop is overwriting ldq entries")

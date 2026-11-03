@@ -1181,6 +1181,9 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
     io.lsu.dis_uops(w).bits  := dis_uops(w)
   }
 
+  // address where the coro registers are stored
+  io.lsu.coro_frame_base := 0.U.asTypeOf(io.lsu.coro_frame_base)
+
   // tell LSU about committing loads and stores to clear entries
   io.lsu.commit                  := rob.io.commit
 

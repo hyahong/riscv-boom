@@ -101,6 +101,7 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
   val decode_units     = for (w <- 0 until decodeWidth) yield { val d = Module(new DecodeUnit); d }
   val ren1_brmask_logic = Module(new BranchMaskGenerationLogic(coreWidth))
   val coro_expander     = if (enableSDM) Some(Module(new CoroUopExpander)) else None
+  val coro_register_state = if (enableSDM) Some(Module(new CoroRegisterState)) else None
   val rename_stage     = Module(new RenameStage(coreWidth, numIntPhysRegs, numIntRenameWakeupPorts, false))
   val fp_rename_stage  = if (usingFPU) Module(new RenameStage(coreWidth, numFpPhysRegs, numFpWakeupPorts, true)) else null
   val pred_rename_stage = Module(new PredRenameStage(coreWidth, ftqSz, 1))
@@ -651,6 +652,28 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
   }
 
   branch_mask_full := ren1_brmask_logic.io.is_full
+
+  //-------------------------------------------------------------
+  // SDM register state (valid/dirty)
+
+  coro_register_state.foreach { state =>
+    state.io.init := 0.U.asTypeOf(state.io.init)
+    state.io.kill := ren1_kill
+    state.io.flush := rob.io.flush.valid
+    state.io.rollback.valid := brupdate.b2.mispredict && !RegNext(rob.io.flush.valid)
+    state.io.rollback.bits := brupdate.b2.uop.br_tag
+
+    for (w <- 0 until coreWidth) {
+      state.io.update(w).valid := ren1_fire(w)
+      state.io.update(w).bits.setFromUop(ren1_uops(w))
+
+      state.io.br_tags(w).valid := ren1_fire(w) && ren1_uops(w).allocate_brtag
+      state.io.br_tags(w).bits := ren1_uops(w).br_tag
+
+      state.io.commit(w).valid := rob.io.commit.valids(w)
+      state.io.commit(w).bits.setFromUop(rob.io.commit.uops(w))
+    }
+  }
 
   //-------------------------------------------------------------
   //-------------------------------------------------------------

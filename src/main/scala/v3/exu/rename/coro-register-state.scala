@@ -24,6 +24,21 @@ class CoroRegisterUpdate(implicit p: Parameters) extends BoomBundle
   val context = new SDMContextTag
   val op      = CoroRegisterOp()
   val lreg    = UInt(log2Ceil(coroNumIntRegisters).W)
+
+  def setFromUop(uop: MicroOp): Unit = {
+    context := uop.sdm.context
+    op := CoroRegisterOp.NONE
+    lreg := uop.ldst
+    when (!uop.exception && (uop.sdm.context.is_coro || uop.is_internal)) {
+      when (uop.is_internal && uop.uses_stq && uop.lrs2_rtype === RT_FIX) {
+        op := CoroRegisterOp.SAVE
+        lreg := uop.lrs2
+      } .elsewhen (uop.ldst_val && uop.dst_rtype === RT_FIX) {
+        op := Mux(uop.is_internal && uop.uses_ldq,
+          CoroRegisterOp.RESTORE, CoroRegisterOp.WRITE)
+      }
+    }
+  }
 }
 
 class CoroRegisterState(implicit p: Parameters) extends BoomModule

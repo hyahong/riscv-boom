@@ -15,8 +15,27 @@ class CoroExpansionStep(implicit p: Parameters) extends BoomBundle
 
 object CoroUopExpander
 {
-  private def restoreUop(consumer: MicroOp, lreg: UInt)(implicit p: Parameters): MicroOp = {
+  private def sameContext(a: SDMContextTag, b: SDMContextTag): Bool = {
+    a.is_coro === b.is_coro && (!a.is_coro || a.cid === b.cid)
+  }
+
+  private def copyUop(origin: MicroOp)(implicit p: Parameters): MicroOp = {
     val uop = WireInit(0.U.asTypeOf(new MicroOp))
+
+    uop.sdm.context := origin.sdm.context
+    uop.debug_pc := origin.debug_pc
+    uop.ftq_idx := origin.ftq_idx
+    uop.pc_lob := origin.pc_lob
+    uop.edge_inst := origin.edge_inst
+    uop.is_rvc := origin.is_rvc
+    uop.debug_fsrc := origin.debug_fsrc
+    uop.debug_tsrc := origin.debug_tsrc
+
+    uop
+  }
+
+  private def restoreUop(consumer: MicroOp, lreg: UInt)(implicit p: Parameters): MicroOp = {
+    val uop = copyUop(consumer)
 
     uop.uopc := uopLD
     uop.is_internal := true.B
@@ -28,7 +47,7 @@ object CoroUopExpander
     uop.lrs2_rtype := RT_X
 
     uop.fu_code := FUConstants.FU_MEM
-    uop.iq_type := 0.U
+    uop.iq_type := 0.U // bypass
     uop.uses_ldq := true.B
     uop.mem_cmd := freechips.rocketchip.rocket.M_XRD
     uop.mem_size := 3.U
@@ -37,56 +56,92 @@ object CoroUopExpander
     uop.inst := Cat(0.U(17.W), 3.U(3.W), lreg, "b0000011".U(7.W))
     uop.debug_inst := uop.inst
 
-    uop.sdm.context := consumer.sdm.context
-    uop.debug_pc := consumer.debug_pc
-    uop.ftq_idx := consumer.ftq_idx
-    uop.pc_lob := consumer.pc_lob
-    uop.edge_inst := consumer.edge_inst
-    uop.is_rvc := consumer.is_rvc
-    uop.debug_fsrc := consumer.debug_fsrc
-    uop.debug_tsrc := consumer.debug_tsrc
+    uop
+  }
+
+  private def saveUop(boundary: MicroOp, lreg: UInt)(implicit p: Parameters): MicroOp = {
+    val uop = copyUop(boundary)
+
+    uop.uopc := uopSTD
+    uop.is_internal := true.B
+
+    uop.dst_rtype := RT_X
+    uop.lrs1_rtype := RT_X
+    uop.lrs2 := lreg
+    uop.lrs2_rtype := RT_FIX
+
+    uop.fu_code := FUConstants.FU_MEM
+    uop.iq_type := IQT_MEM
+    uop.uses_stq := true.B
+    uop.mem_cmd := freechips.rocketchip.rocket.M_XWR
+    uop.mem_size := 3.U
+
+    uop.inst := Cat(0.U(7.W), lreg, 0.U(5.W), 3.U(3.W), 0.U(5.W), "b0100011".U(7.W))
+    uop.debug_inst := uop.inst
 
     uop
   }
 
-  private def restorePlan(pending: Vec[Valid[MicroOp]], state: CoroRegisterStatus)(implicit p: Parameters): Vec[Valid[CoroExpansionStep]] = {
+  private def expansionPlan(pending: Vec[Valid[MicroOp]], state: CoroRegisterStatus,
+    last_origin: Valid[MicroOp], enable: Bool)(implicit p: Parameters): Vec[Valid[CoroExpansionStep]] = {
     val width = pending.length
     val plan = Wire(Vec(width, Valid(new CoroExpansionStep)))
     val available = Wire(Vec(width + 1, UInt(width.W)))
     val context = Wire(Vec(width + 1, new SDMContextTag))
     val valid = Wire(Vec(width + 1, UInt(state.coroNumIntRegisters.W)))
+    val dirty = Wire(Vec(width + 1, UInt(state.coroNumIntRegisters.W)))
+    val origin = Wire(Vec(width + 1, Valid(new MicroOp)))
     val reg_bits = log2Ceil(state.coroNumIntRegisters)
 
     available(0) := VecInit(pending.map(_.valid)).asUInt
     context(0) := state.context
     valid(0) := state.valid
+    dirty(0) := state.dirty & ~1.U(state.coroNumIntRegisters.W)
+    origin(0) := last_origin
 
     for (w <- 0 until width) {
       val oldest = PriorityEncoderOH(available(w))
       val original = Mux1H(oldest, pending.map(_.bits))
-      val same_context = context(w).is_coro === original.sdm.context.is_coro &&
-        (!original.sdm.context.is_coro || context(w).cid === original.sdm.context.cid)
+      val same_context = sameContext(context(w), original.sdm.context)
+      val save = !same_context && dirty(w).orR
+      val save_lreg = PriorityEncoder(dirty(w))
       val source_valid = Mux(same_context, valid(w), 0.U)
       val rs1 = original.lrs1(reg_bits - 1, 0)
       val rs2 = original.lrs2(reg_bits - 1, 0)
       val restore_rs1 = original.lrs1_rtype === RT_FIX && rs1 =/= 0.U && !source_valid(rs1)
       val restore_rs2 = original.lrs2_rtype === RT_FIX && rs2 =/= 0.U && !source_valid(rs2)
-      val restore = original.sdm.context.is_coro && !original.exception && (restore_rs1 || restore_rs2)
+      val restore = !save && original.sdm.context.is_coro && !original.exception && (restore_rs1 || restore_rs2)
       val restore_lreg = Mux(restore_rs1, rs1, rs2)
 
       plan(w).valid := available(w).orR
-      plan(w).bits.use_original := !restore
-      plan(w).bits.uop := restoreUop(original, restore_lreg)
-      available(w + 1) := available(w) & ~Mux(restore, 0.U(width.W), oldest)
+      plan(w).bits.use_original := !(save || restore)
+      plan(w).bits.uop := Mux(save, saveUop(origin(w).bits, save_lreg), restoreUop(original, restore_lreg))
+      available(w + 1) := available(w) & ~Mux(save || restore, 0.U(width.W), oldest)
 
-      // avoid duplication
+      when (enable && plan(w).valid && save) {
+        assert(origin(w).valid && sameContext(origin(w).bits.sdm.context, context(w)),
+          "save requires the outgoing context's accepted boundary")
+      }
+
       val update = Wire(new CoroRegisterUpdate)
-      update.setFromUop(Mux(restore, plan(w).bits.uop, original))
+      // forward placement
+      update.setFromUop(Mux(save || restore, plan(w).bits.uop, original))
 
       val make_valid = update.op === CoroRegisterOp.WRITE || update.op === CoroRegisterOp.RESTORE
-      val reg_mask = Mux(make_valid && update.lreg =/= 0.U, UIntToOH(update.lreg, state.coroNumIntRegisters), 0.U)
-      context(w + 1) := Mux(plan(w).valid, original.sdm.context, context(w))
-      valid(w + 1) := Mux(plan(w).valid, source_valid | reg_mask, valid(w))
+      val reg_mask = Mux(update.lreg =/= 0.U, UIntToOH(update.lreg, state.coroNumIntRegisters), 0.U)
+      val prior_dirty = Mux(same_context, dirty(w), 0.U)
+      context(w + 1) := Mux(plan(w).valid && !save, original.sdm.context, context(w))
+      valid(w + 1) := Mux(plan(w).valid && !save,
+        source_valid | Mux(make_valid, reg_mask, 0.U), valid(w))
+      dirty(w + 1) := Mux(plan(w).valid,
+        Mux(save, dirty(w) & ~reg_mask,
+          prior_dirty | Mux(update.op === CoroRegisterOp.WRITE, reg_mask, 0.U)), dirty(w))
+
+      origin(w + 1) := origin(w)
+      when (plan(w).valid && plan(w).bits.use_original) {
+        origin(w + 1).valid := true.B
+        origin(w + 1).bits := copyUop(original)
+      }
     }
 
     plan
@@ -115,6 +170,10 @@ class CoroUopExpander(implicit p: Parameters) extends BoomModule
   val held_origins = Reg(Vec(coreWidth, UInt(coreWidth.W)))
   val held_valids = RegInit(0.U(coreWidth.W))
 
+  // The last accepted original is the outgoing boundary when context changes.
+  val last_origin = Reg(new MicroOp)
+  val last_origin_valid = RegInit(false.B)
+
   val live = !reset.asBool && !io.kill
   val holding = held_valids.orR
 
@@ -123,10 +182,12 @@ class CoroUopExpander(implicit p: Parameters) extends BoomModule
     pending(w).valid := live && original_valids(w)
     pending(w).bits := originals(w)
   }
-  val plan = CoroUopExpander.restorePlan(pending, io.register_state)
-
   // stalled suffix keeps its plan until every output has been processed
   val plan_fire = live && original_valids.orR && !holding
+  val origin = Wire(Valid(new MicroOp))
+  origin.valid := last_origin_valid
+  origin.bits := last_origin
+  val plan = CoroUopExpander.expansionPlan(pending, io.register_state, origin, plan_fire)
 
   val available = Wire(Vec(coreWidth + 1, UInt(coreWidth.W)))
   val expanded = Wire(Vec(coreWidth, new MicroOp))
@@ -174,6 +235,7 @@ class CoroUopExpander(implicit p: Parameters) extends BoomModule
   when (io.kill) {
     original_valids := 0.U
     held_valids := 0.U
+    last_origin_valid := false.B
   } .otherwise {
     original_valids := remaining_originals
     held_valids := remaining_outputs
@@ -184,6 +246,12 @@ class CoroUopExpander(implicit p: Parameters) extends BoomModule
     when (plan_fire) {
       held_uops := expanded
       held_origins := origins
+    }
+    for (w <- 0 until coreWidth) {
+      when (fired(w) && !io.out(w).bits.is_internal) {
+        last_origin := CoroUopExpander.copyUop(io.out(w).bits)
+        last_origin_valid := true.B
+      }
     }
   }
 

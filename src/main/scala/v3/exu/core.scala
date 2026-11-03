@@ -99,7 +99,8 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
   val numFpWakeupPorts        = if (usingFPU) fp_pipeline.io.wakeups.length else 0
 
   val decode_units     = for (w <- 0 until decodeWidth) yield { val d = Module(new DecodeUnit); d }
-  val dec_brmask_logic = Module(new BranchMaskGenerationLogic(coreWidth))
+  val ren1_brmask_logic = Module(new BranchMaskGenerationLogic(coreWidth))
+  val coro_expander     = if (enableSDM) Some(Module(new CoroUopExpander)) else None
   val rename_stage     = Module(new RenameStage(coreWidth, numIntPhysRegs, numIntRenameWakeupPorts, false))
   val fp_rename_stage  = if (usingFPU) Module(new RenameStage(coreWidth, numFpPhysRegs, numFpWakeupPorts, true)) else null
   val pred_rename_stage = Module(new PredRenameStage(coreWidth, ftqSz, 1))
@@ -159,7 +160,12 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
   val dec_fire   = Wire(Vec(coreWidth, Bool()))  // can the instruction fire beyond decode?
                                                     // (can still be stopped in ren or dis)
   val dec_ready  = Wire(Bool())
-  val dec_xcpts  = Wire(Vec(coreWidth, Bool()))
+  // SDM buffer decodes originals before the rename input
+  // these signals refer to the expanded stream
+  val ren1_valids = Wire(Vec(coreWidth, Bool()))
+  val ren1_uops   = Wire(Vec(coreWidth, new MicroOp))
+  val ren1_fire   = Wire(Vec(coreWidth, Bool()))
+  val ren1_xcpts  = Wire(Vec(coreWidth, Bool()))
   val ren_stalls = Wire(Vec(coreWidth, Bool()))
 
   // Rename2/Dispatch stage
@@ -520,6 +526,9 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
     decode_units(w).io.interrupt_cause := csr.io.interrupt_cause
 
     dec_uops(w) := decode_units(w).io.deq.uop
+    // these will be assigned in expansion
+    dec_uops(w).br_tag := 0.U
+    dec_uops(w).br_mask := 0.U
   }
 
   //-------------------------------------------------------------
@@ -553,11 +562,17 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
 
 
   // Frontend Exception Requests
-  val xcpt_idx = PriorityEncoder(dec_xcpts)
-  xcpt_pc_req.valid    := dec_xcpts.reduce(_||_)
-  xcpt_pc_req.bits     := dec_uops(xcpt_idx).ftq_idx
-  //rob.io.xcpt_fetch_pc := RegEnable(io.ifu.get_pc.fetch_pc, dis_ready)
+  val xcpt_idx = PriorityEncoder(ren1_xcpts)
+  xcpt_pc_req.valid    := ren1_xcpts.reduce(_||_)
+  xcpt_pc_req.bits     := ren1_uops(xcpt_idx).ftq_idx
   rob.io.xcpt_fetch_pc := io.ifu.get_pc(0).pc
+  if (enableSDM) {
+    val xcpt_pc_return = RegNext((ren1_xcpts zip ren1_fire).map {
+      case (xcpt, fire) => xcpt && fire
+    }.reduce(_||_), false.B)
+    val held_xcpt_pc = RegEnable(io.ifu.get_pc(0).pc, xcpt_pc_return)
+    rob.io.xcpt_fetch_pc := Mux(xcpt_pc_return, io.ifu.get_pc(0).pc, held_xcpt_pc)
+  }
 
   flush_pc_req.valid   := rob.io.flush.valid
   flush_pc_req.bits    := rob.io.flush.bits.ftq_idx
@@ -567,27 +582,51 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
 
 
   //-------------------------------------------------------------
-  // Decode/Rename1 pipeline logic
+  // Decode+Expande1 / Expande2+Rename1 pipeline logic
 
-  dec_xcpts := dec_uops zip dec_valids map {case (u,v) => u.exception && v}
-  val dec_xcpt_stall = dec_xcpts.reduce(_||_) && !xcpt_pc_req.ready
-  // stall fetch/dcode because we ran out of branch tags
+  val ren1_kill = rob.io.commit.rollback || brupdate.b1.mispredict_mask.orR ||
+    brupdate.b2.mispredict || io.ifu.redirect_flush || (enableSDM.B && rob.io.flush.valid)
+
+  if (enableSDM) {
+    val expander = coro_expander.get
+    expander.io.kill := ren1_kill
+    expander.io.in.valid := dec_valids.asUInt.orR && !ren1_kill
+
+    for (w <- 0 until coreWidth) {
+      expander.io.in.bits(w).valid := dec_valids(w)
+      expander.io.in.bits(w).bits := dec_uops(w)
+      dec_fire(w) := expander.io.in.fire && dec_valids(w)
+
+      expander.io.expand.bits(w).valid := expander.io.pending(w).valid
+      expander.io.expand.bits(w).bits.use_original := true.B
+      expander.io.expand.bits(w).bits.uop := 0.U.asTypeOf(new MicroOp)
+      ren1_valids(w) := expander.io.out(w).valid
+      ren1_uops(w) := expander.io.out(w).bits
+    }
+    expander.io.expand.valid := expander.io.pending.map(_.valid).reduce(_||_)
+    expander.io.fire := ren1_fire
+  } else {
+    ren1_valids := dec_valids
+    ren1_uops := dec_uops
+    dec_fire := ren1_fire
+  }
+
+  ren1_xcpts := ren1_uops zip ren1_valids map {case (u,v) => u.exception && v}
+  val ren1_xcpt_stall = ren1_xcpts.reduce(_||_) && !xcpt_pc_req.ready
   val branch_mask_full = Wire(Vec(coreWidth, Bool()))
 
-  val dec_hazards = (0 until coreWidth).map(w =>
-                      dec_valids(w) &&
-                      (  !dis_ready
-                      || rob.io.commit.rollback
-                      || dec_xcpt_stall
+  val ren1_hazards = (0 until coreWidth).map(w =>
+                      ren1_valids(w) &&
+                      (!dis_ready
+                      || ren1_xcpt_stall
                       || branch_mask_full(w)
-                      || brupdate.b1.mispredict_mask =/= 0.U
-                      || brupdate.b2.mispredict
-                      || io.ifu.redirect_flush))
+                      || ren1_kill))
 
-  val dec_stalls = dec_hazards.scanLeft(false.B) ((s,h) => s || h).takeRight(coreWidth)
-  dec_fire := (0 until coreWidth).map(w => dec_valids(w) && !dec_stalls(w))
+  val ren1_stalls = ren1_hazards.scanLeft(false.B) ((s,h) => s || h).takeRight(coreWidth)
+  ren1_fire := (0 until coreWidth).map(w => ren1_valids(w) && !ren1_stalls(w))
 
-  // all decoders are empty and ready for new instructions
+  // FetchBuffer advances whole rows only. A partial row may already have been accepted into the expander.
+  // keep masking those slots until the last fire.
   dec_ready := dec_fire.last
 
   when (dec_ready || io.ifu.redirect_flush) {
@@ -599,18 +638,19 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
   //-------------------------------------------------------------
   // Branch Mask Logic
 
-  dec_brmask_logic.io.brupdate := brupdate
-  dec_brmask_logic.io.flush_pipeline := RegNext(rob.io.flush.valid)
+  ren1_brmask_logic.io.brupdate := brupdate
+  ren1_brmask_logic.io.flush_pipeline := RegNext(rob.io.flush.valid)
 
   for (w <- 0 until coreWidth) {
-    dec_brmask_logic.io.is_branch(w) := !dec_finished_mask(w) && dec_uops(w).allocate_brtag
-    dec_brmask_logic.io.will_fire(w) :=  dec_fire(w) &&
-                                         dec_uops(w).allocate_brtag // ren, dis can back pressure us
-    dec_uops(w).br_tag  := dec_brmask_logic.io.br_tag(w)
-    dec_uops(w).br_mask := dec_brmask_logic.io.br_mask(w)
+    val valid = if (enableSDM) ren1_valids(w) else !dec_finished_mask(w)
+    ren1_brmask_logic.io.is_branch(w) := valid && ren1_uops(w).allocate_brtag
+    ren1_brmask_logic.io.will_fire(w) := ren1_fire(w) && ren1_uops(w).allocate_brtag
+
+    ren1_uops(w).br_tag  := ren1_brmask_logic.io.br_tag(w)
+    ren1_uops(w).br_mask := ren1_brmask_logic.io.br_mask(w)
   }
 
-  branch_mask_full := dec_brmask_logic.io.is_full
+  branch_mask_full := ren1_brmask_logic.io.is_full
 
   //-------------------------------------------------------------
   //-------------------------------------------------------------
@@ -625,8 +665,9 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
 
     rename.io.debug_rob_empty := rob.io.empty
 
-    rename.io.dec_fire := dec_fire
-    rename.io.dec_uops := dec_uops
+    // it would be nice to rename (not this) the io.dec_* signals but...
+    rename.io.dec_fire := ren1_fire
+    rename.io.dec_uops := ren1_uops
 
     rename.io.dis_fire := dis_fire
     rename.io.dis_ready := dis_ready

@@ -49,7 +49,7 @@ object CoroUopExpander
     uop
   }
 
-  def restorePlan(pending: Vec[Valid[MicroOp]], state: CoroRegisterStatus)(implicit p: Parameters): Vec[Valid[CoroExpansionStep]] = {
+  private def restorePlan(pending: Vec[Valid[MicroOp]], state: CoroRegisterStatus)(implicit p: Parameters): Vec[Valid[CoroExpansionStep]] = {
     val width = pending.length
     val plan = Wire(Vec(width, Valid(new CoroExpansionStep)))
     val available = Wire(Vec(width + 1, UInt(width.W)))
@@ -96,13 +96,12 @@ object CoroUopExpander
 class CoroUopExpander(implicit p: Parameters) extends BoomModule
 {
   val io = IO(new BoomBundle {
-    // in <> out
+    // uops
     val in = Flipped(Decoupled(Vec(coreWidth, Valid(new MicroOp))))
     val out = Output(Vec(coreWidth, Valid(new MicroOp)))
 
-    // pending <> expand
-    val pending = Output(Vec(coreWidth, Valid(new MicroOp)))
-    val expand = Flipped(Decoupled(Vec(coreWidth, Valid(new CoroExpansionStep))))
+    // state
+    val register_state = Input(new CoroRegisterStatus)
 
     val fire = Input(Vec(coreWidth, Bool()))
 
@@ -119,7 +118,15 @@ class CoroUopExpander(implicit p: Parameters) extends BoomModule
   val live = !reset.asBool && !io.kill
   val holding = held_valids.orR
 
-  io.expand.ready := live && original_valids.orR && !holding
+  val pending = Wire(Vec(coreWidth, Valid(new MicroOp)))
+  for (w <- 0 until coreWidth) {
+    pending(w).valid := live && original_valids(w)
+    pending(w).bits := originals(w)
+  }
+  val plan = CoroUopExpander.restorePlan(pending, io.register_state)
+
+  // stalled suffix keeps its plan until every output has been processed
+  val plan_fire = live && original_valids.orR && !holding
 
   val available = Wire(Vec(coreWidth + 1, UInt(coreWidth.W)))
   val expanded = Wire(Vec(coreWidth, new MicroOp))
@@ -127,17 +134,15 @@ class CoroUopExpander(implicit p: Parameters) extends BoomModule
   available(0) := original_valids
 
   for (w <- 0 until coreWidth) {
-    val step = io.expand.bits(w)
+    val step = plan(w)
     val oldest = PriorityEncoderOH(available(w))
     origins(w) := Mux(step.valid && step.bits.use_original, oldest, 0.U)
     available(w + 1) := available(w) & ~origins(w)
     expanded(w) := Mux(step.bits.use_original, Mux1H(oldest, originals), step.bits.uop)
 
-    io.pending(w).valid := live && original_valids(w)
-    io.pending(w).bits := originals(w)
     io.out(w).bits := Mux(holding, held_uops(w), expanded(w))
 
-    when (io.expand.fire && step.valid) {
+    when (plan_fire && step.valid) {
       assert(available(w).orR, "expansion step requires a pending original")
       when (!step.bits.use_original) {
         assert(step.bits.uop.is_internal, "inserted uop must be internal")
@@ -145,8 +150,8 @@ class CoroUopExpander(implicit p: Parameters) extends BoomModule
     }
   }
 
-  val expansion_valids = VecInit(io.expand.bits.map(_.valid)).asUInt
-  val output_valids = Mux(holding, held_valids, Mux(io.expand.fire, expansion_valids, 0.U))
+  val expansion_valids = VecInit(plan.map(_.valid)).asUInt
+  val output_valids = Mux(holding, held_valids, Mux(plan_fire, expansion_valids, 0.U))
   val fired = io.fire.asUInt & output_valids & Fill(coreWidth, live)
   val consumed = (0 until coreWidth).map { w =>
     Mux(fired(w), Mux(holding, held_origins(w), origins(w)), 0.U(coreWidth.W))
@@ -176,7 +181,7 @@ class CoroUopExpander(implicit p: Parameters) extends BoomModule
       original_valids := VecInit(io.in.bits.map(_.valid)).asUInt
       originals := VecInit(io.in.bits.map(_.bits))
     }
-    when (io.expand.fire) {
+    when (plan_fire) {
       held_uops := expanded
       held_origins := origins
     }
@@ -190,7 +195,7 @@ class CoroUopExpander(implicit p: Parameters) extends BoomModule
       }
     }
   }
-  when (io.expand.fire) {
+  when (plan_fire) {
     assert(expansion_valids.orR, "expansion packet must not be empty")
   }
 }

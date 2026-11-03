@@ -592,7 +592,7 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
     val expander = coro_expander.get
     expander.io.kill := ren1_kill
     expander.io.in.valid := dec_valids.asUInt.orR && !ren1_kill
-    expander.io.expand.bits := CoroUopExpander.restorePlan(expander.io.pending, coro_register_state.get.io.speculative)
+    expander.io.register_state := coro_register_state.get.io.speculative
 
     for (w <- 0 until coreWidth) {
       expander.io.in.bits(w).valid := dec_valids(w)
@@ -602,7 +602,6 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
       ren1_valids(w) := expander.io.out(w).valid
       ren1_uops(w) := expander.io.out(w).bits
     }
-    expander.io.expand.valid := expander.io.pending.map(_.valid).reduce(_||_)
     expander.io.fire := ren1_fire
   } else {
     ren1_valids := dec_valids

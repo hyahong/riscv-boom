@@ -205,6 +205,7 @@ class FetchBundle(implicit p: Parameters) extends BoomBundle
   val pc            = UInt(vaddrBitsExtended.W)
   val context       = new SDMContextTag
   val saved_tail    = Vec(fetchWidth, Valid(UInt(coroPCBufferPtrBits.W)))
+  val last_end      = Valid(UInt(log2Ceil(fetchWidth).W))
   val next_pc       = UInt(vaddrBitsExtended.W)
   val edge_inst     = Vec(nBanks, Bool()) // True if 1st instruction in this bundle is pc - 2
   val insts         = Vec(fetchWidth, Bits(32.W))
@@ -305,6 +306,12 @@ class BoomFrontendIO(implicit p: Parameters) extends BoomBundle
 
   val context_init = Output(Valid(new CoroPCBufferInit))
   val context_redirect = Decoupled(UInt(log2Ceil(ftqSz).W))
+  val context_commit_tail = Output(Valid(UInt(coroPCBufferPtrBits.W)))
+  val context_flush = Output(Bool())
+  val context_kill = Output(Bool())
+
+  val last_end = Input(Bool())
+  val stop_fetch = Output(Bool())
 
   val commit = Valid(UInt(ftqSz.W))
 
@@ -364,6 +371,7 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
   val ras = Module(new BoomRAS)
 
   val coro_pc_buffer = if (enableSDM) Some(Module(new CoroPCBuffer)) else None
+  val coro_transition = if (enableSDM) Some(Module(new CoroTransition)) else None
   val target_pc = WireInit(0.U(vaddrBitsExtended.W))
   val target_context = WireInit(0.U.asTypeOf(new SDMContextTag))
   val target_ghist = WireInit(0.U.asTypeOf(new GlobalHistory))
@@ -372,13 +380,15 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
   // in ROB flush, make the FTQ use this history
   target_ghist.current_saw_branch_not_taken := true.B
   io.cpu.context_redirect.ready := false.B
+  io.cpu.last_end := false.B
   coro_pc_buffer.foreach { buffer =>
     buffer.io.init := io.cpu.context_init
-    buffer.io.push.valid := false.B
-    buffer.io.push.bits := 0.U.asTypeOf(buffer.io.push.bits)
-    buffer.io.commit_tail := 0.U.asTypeOf(buffer.io.commit_tail)
-    buffer.io.rollback_tail := 0.U.asTypeOf(buffer.io.rollback_tail)
-    buffer.io.flush := false.B
+    buffer.io.push <> coro_transition.get.io.entry
+    buffer.io.commit_tail := io.cpu.context_commit_tail
+    buffer.io.rollback_tail.valid := io.cpu.brupdate.b2.mispredict &&
+      !RegNext(io.cpu.context_flush, false.B) && io.cpu.brupdate.b2.uop.sdm.saved_tail.valid
+    buffer.io.rollback_tail.bits := io.cpu.brupdate.b2.uop.sdm.saved_tail.bits
+    buffer.io.flush := io.cpu.context_flush
     buffer.io.target_cid := 0.U
 
     target_pc := buffer.io.pc
@@ -634,6 +644,7 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
   val f3_fetch_bundle = Wire(new FetchBundle)
   val f3_mask         = Wire(Vec(fetchWidth, Bool()))
   val f3_br_mask      = Wire(Vec(fetchWidth, Bool()))
+  val f3_end_mask     = Wire(Vec(fetchWidth, Bool()))
   val f3_call_mask    = Wire(Vec(fetchWidth, Bool()))
   val f3_ret_mask     = Wire(Vec(fetchWidth, Bool()))
   val f3_npc_plus4_mask = Wire(Vec(fetchWidth, Bool()))
@@ -643,6 +654,7 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
   f3_fetch_bundle.pc := f3_imemresp.pc
   f3_fetch_bundle.context := f3_imemresp.context
   f3_fetch_bundle.saved_tail := 0.U.asTypeOf(f3_fetch_bundle.saved_tail)
+  f3_fetch_bundle.last_end := 0.U.asTypeOf(f3_fetch_bundle.last_end)
   f3_fetch_bundle.ftq_idx := 0.U // This gets assigned later
   f3_fetch_bundle.xcpt_pf_if := f3_imemresp.xcpt.pf.inst
   f3_fetch_bundle.xcpt_ae_if := f3_imemresp.xcpt.ae.inst
@@ -660,6 +672,7 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
   require(fetchWidth >= 4) // Logic gets kind of annoying with fetchWidth = 2
   def isRVC(inst: UInt) = (inst(1,0) =/= 3.U)
   var redirect_found = false.B
+  var end_found = false.B
   var bank_prev_is_half = f3_prev_is_half && f3_prev_context_match
   var bank_prev_half    = f3_prev_half
   var last_inst = 0.U(16.W)
@@ -755,8 +768,11 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
       f3_is_rvc(i) := isRVC(bank_insts(w))
 
 
-      bank_mask(w) := f3.io.deq.valid && f3_imemresp.mask(i) && valid && !redirect_found
-      f3_mask  (i) := f3.io.deq.valid && f3_imemresp.mask(i) && valid && !redirect_found
+      bank_mask(w) := f3.io.deq.valid && f3_imemresp.mask(i) && valid && !redirect_found && !end_found
+      f3_mask  (i) := f3.io.deq.valid && f3_imemresp.mask(i) && valid && !redirect_found && !end_found
+      // is this SDM end instruction?
+      f3_end_mask(i) := enableSDM.B && f3_imemresp.context.is_coro && f3_mask(i) && !f3_fetch_bundle.xcpt_pf_if &&
+        !f3_fetch_bundle.xcpt_ae_if && SDMInstructions.END === f3_fetch_bundle.exp_insts(i)
       f3_targs (i) := Mux(brsigs.cfi_type === CFI_JALR,
         f3_bpd_resp.io.deq.bits.preds(i).predicted_pc.bits,
         brsigs.target)
@@ -811,6 +827,7 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
       f3_fetch_bundle.bp_xcpt_if_oh (i) := bpu.io.xcpt_if
 
       redirect_found = redirect_found || f3_redirects(i)
+      end_found = end_found || f3_end_mask(i)
     }
     last_inst = bank_insts(bankWidth-1)(15,0)
     bank_prev_is_half = Mux(f3_bank_mask(b),

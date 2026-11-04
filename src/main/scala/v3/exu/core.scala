@@ -102,6 +102,7 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
   val ren1_brmask_logic = Module(new BranchMaskGenerationLogic(coreWidth))
   val coro_expander     = if (enableSDM) Some(Module(new CoroUopExpander)) else None
   val coro_register_state = if (enableSDM) Some(Module(new CoroRegisterState)) else None
+  val coro_controller   = if (enableSDM) Some(Module(new CoroController)) else None
   val rename_stage     = Module(new RenameStage(coreWidth, numIntPhysRegs, numIntRenameWakeupPorts, false))
   val fp_rename_stage  = if (usingFPU) Module(new RenameStage(coreWidth, numFpPhysRegs, numFpWakeupPorts, true)) else null
   val pred_rename_stage = Module(new PredRenameStage(coreWidth, ftqSz, 1))
@@ -591,8 +592,9 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
   if (enableSDM) {
     val expander = coro_expander.get
     expander.io.kill := ren1_kill
-    expander.io.in.valid := dec_valids.asUInt.orR && !ren1_kill
+    expander.io.in.valid := dec_valids.asUInt.orR && !ren1_kill && !coro_controller.get.io.block_decode
     expander.io.register_state := coro_register_state.get.io.speculative
+    expander.io.boundary := coro_controller.get.io.boundary
 
     for (w <- 0 until coreWidth) {
       expander.io.in.bits(w).valid := dec_valids(w)
@@ -654,7 +656,7 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
   // SDM register state (valid/dirty)
 
   coro_register_state.foreach { state =>
-    state.io.init := 0.U.asTypeOf(state.io.init)
+    state.io.init := coro_controller.get.io.init
     state.io.kill := ren1_kill
     state.io.flush := rob.io.flush.valid
     state.io.rollback.valid := brupdate.b2.mispredict && !RegNext(rob.io.flush.valid)
@@ -1064,6 +1066,32 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
 
   val csr_exe_unit = exe_units.csr_unit
 
+  coro_controller.foreach { controller =>
+    val req = csr_exe_unit.io.req
+    controller.io.execute.valid := req.valid && CoroController.isCommand(req.bits.uop) &&
+      !req.bits.kill && !IsKilledByBranch(brupdate, req.bits.uop)
+    controller.io.execute.bits.uop := req.bits.uop
+    controller.io.execute.bits.rs1 := req.bits.rs1_data
+    controller.io.execute.bits.rs2 := req.bits.rs2_data
+
+    val commands = (0 until coreWidth).map(w =>
+      rob.io.commit.valids(w) && CoroController.isCommand(rob.io.commit.uops(w)))
+    controller.io.commit.valid := commands.reduce(_ || _)
+    controller.io.commit.bits := Mux1H(commands, rob.io.commit.uops)
+    controller.io.flush := ren1_kill
+    controller.io.redirect.valid := io.ifu.redirect_val && io.ifu.redirect_flush
+    controller.io.redirect.bits := io.ifu.redirect_pc
+    controller.io.pipeline_empty := rob.io.empty && rob.io.ready && io.lsu.fencei_rdy
+    controller.io.committed := coro_register_state.get.io.committed
+
+    when (controller.io.commit.valid && controller.io.commit.bits.uopc === uopSDM.RUN) {
+      assert(!csr.io.status.mie, "run requires maskable interrupts to be disabled")
+    }
+    when (controller.io.block_decode) {
+      assert(!rob.io.com_xcpt.valid, "architectural traps during SDM execution are unsupported")
+    }
+  }
+
   // for critical path reasons, we aren't zero'ing this out if resp is not valid
   val csr_rw_cmd = csr_exe_unit.io.iresp.bits.uop.ctrl.csr_cmd
   val wb_wdata = csr_exe_unit.io.iresp.bits.data
@@ -1183,6 +1211,7 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
 
   // address where the coro registers are stored
   io.lsu.coro_frame_base := 0.U.asTypeOf(io.lsu.coro_frame_base)
+  coro_controller.foreach { controller => io.lsu.coro_frame_base := controller.io.frame_base }
 
   // tell LSU about committing loads and stores to clear entries
   io.lsu.commit                  := rob.io.commit

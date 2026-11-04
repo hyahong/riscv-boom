@@ -82,8 +82,8 @@ object CoroUopExpander
     uop
   }
 
-  private def expansionPlan(pending: Vec[Valid[MicroOp]], state: CoroRegisterStatus,
-    last_origin: Valid[MicroOp], enable: Bool)(implicit p: Parameters): Vec[Valid[CoroExpansionStep]] = {
+  private def expansionPlan(pending: Vec[Valid[MicroOp]], state: CoroRegisterStatus, last_origin: Valid[MicroOp],
+    boundary: Valid[MicroOp], enable: Bool)(implicit p: Parameters): Vec[Valid[CoroExpansionStep]] = {
     val width = pending.length
     val plan = Wire(Vec(width, Valid(new CoroExpansionStep)))
     val available = Wire(Vec(width + 1, UInt(width.W)))
@@ -97,13 +97,13 @@ object CoroUopExpander
     context(0) := state.context
     valid(0) := state.valid
     dirty(0) := state.dirty & ~1.U(state.coroNumIntRegisters.W)
-    origin(0) := last_origin
+    origin(0) := Mux(boundary.valid, boundary, last_origin)
 
     for (w <- 0 until width) {
       val oldest = PriorityEncoderOH(available(w))
       val original = Mux1H(oldest, pending.map(_.bits))
       val same_context = sameContext(context(w), original.sdm.context)
-      val save = !same_context && dirty(w).orR
+      val save = (boundary.valid || !same_context) && dirty(w).orR
       val save_lreg = PriorityEncoder(dirty(w))
       val source_valid = Mux(same_context, valid(w), 0.U)
       val rs1 = original.lrs1(reg_bits - 1, 0)
@@ -113,7 +113,7 @@ object CoroUopExpander
       val restore = !save && original.sdm.context.is_coro && !original.exception && (restore_rs1 || restore_rs2)
       val restore_lreg = Mux(restore_rs1, rs1, rs2)
 
-      plan(w).valid := available(w).orR
+      plan(w).valid := Mux(boundary.valid, dirty(w).orR, available(w).orR)
       plan(w).bits.use_original := !(save || restore)
       plan(w).bits.uop := Mux(save, saveUop(origin(w).bits, save_lreg), restoreUop(original, restore_lreg))
       available(w + 1) := available(w) & ~Mux(save || restore, 0.U(width.W), oldest)
@@ -158,6 +158,9 @@ class CoroUopExpander(implicit p: Parameters) extends BoomModule
     // state
     val register_state = Input(new CoroRegisterStatus)
 
+    // boundary for controller-issued internal uops
+    val boundary = Input(Valid(new MicroOp))
+
     val fire = Input(Vec(coreWidth, Bool()))
 
     val kill = Input(Bool())
@@ -183,11 +186,15 @@ class CoroUopExpander(implicit p: Parameters) extends BoomModule
     pending(w).bits := originals(w)
   }
   // stalled suffix keeps its plan until every output has been processed
-  val plan_fire = live && original_valids.orR && !holding
+  val plan_fire = live && (original_valids.orR || (io.boundary.valid && io.register_state.dirty.orR)) && !holding
   val origin = Wire(Valid(new MicroOp))
   origin.valid := last_origin_valid
   origin.bits := last_origin
-  val plan = CoroUopExpander.expansionPlan(pending, io.register_state, origin, plan_fire)
+  val plan = CoroUopExpander.expansionPlan(pending, io.register_state, origin, io.boundary, plan_fire)
+
+  when (live && io.boundary.valid) {
+    assert(!original_valids.orR, "controller save requires the original packet to be drained")
+  }
 
   val available = Wire(Vec(coreWidth + 1, UInt(coreWidth.W)))
   val expanded = Wire(Vec(coreWidth, new MicroOp))
@@ -204,7 +211,7 @@ class CoroUopExpander(implicit p: Parameters) extends BoomModule
     io.out(w).bits := Mux(holding, held_uops(w), expanded(w))
 
     when (plan_fire && step.valid) {
-      assert(available(w).orR, "expansion step requires a pending original")
+      assert(io.boundary.valid || available(w).orR, "expansion step requires an original or controller save")
       when (!step.bits.use_original) {
         assert(step.bits.uop.is_internal, "inserted uop must be internal")
       }
@@ -221,7 +228,7 @@ class CoroUopExpander(implicit p: Parameters) extends BoomModule
   val remaining_originals = original_valids & ~consumed
   val remaining_outputs = output_valids & ~fired
 
-  io.in.ready := live && !remaining_originals.orR && !remaining_outputs.orR
+  io.in.ready := live && !io.boundary.valid && !remaining_originals.orR && !remaining_outputs.orR
   for (w <- 0 until coreWidth) {
     io.out(w).valid := live && output_valids(w)
     when (live && io.fire(w)) {

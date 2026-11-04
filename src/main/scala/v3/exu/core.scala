@@ -386,7 +386,10 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
   io.ifu.redirect_val         := false.B
   io.ifu.redirect_flush       := false.B
 
-  io.ifu.redirect_context     := 0.U.asTypeOf(io.ifu.redirect_context)
+  io.ifu.redirect_context       := 0.U.asTypeOf(io.ifu.redirect_context)
+  io.ifu.context_init           := 0.U.asTypeOf(io.ifu.context_init)
+  io.ifu.context_redirect.valid := false.B
+  io.ifu.context_redirect.bits  := 0.U
 
   // Breakpoint info
   io.ifu.status  := csr.io.status
@@ -1083,6 +1086,14 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
     controller.io.redirect.bits := io.ifu.redirect_pc
     controller.io.pipeline_empty := rob.io.empty && rob.io.ready && io.lsu.fencei_rdy
     controller.io.committed := coro_register_state.get.io.committed
+
+    io.ifu.context_init.valid := controller.io.init.valid
+    io.ifu.context_init.bits.pc := controller.io.entry_pc
+    io.ifu.context_init.bits.active := VecInit((0 until maxCoroContexts).map(cid =>
+        cid.U < controller.io.active_count.bits)).asUInt
+    io.ifu.context_redirect.valid := controller.io.context_redirect.valid
+    io.ifu.context_redirect.bits := controller.io.context_redirect.bits
+    controller.io.context_redirect.ready := io.ifu.context_redirect.ready
 
     when (controller.io.commit.valid && controller.io.commit.bits.uopc === uopSDM.RUN) {
       assert(!csr.io.status.mie, "run requires maskable interrupts to be disabled")

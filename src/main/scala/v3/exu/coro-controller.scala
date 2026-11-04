@@ -38,6 +38,9 @@ class CoroController(implicit p: Parameters) extends BoomModule
     // committed coro command
     val commit = Input(Valid(new MicroOp))
 
+    val last_end = Input(Bool())
+    val end_commit = Input(Valid(new MicroOp))
+
     val pipeline_empty = Input(Bool())
 
     val flush = Input(Bool())
@@ -51,6 +54,8 @@ class CoroController(implicit p: Parameters) extends BoomModule
 
     val block_decode = Output(Bool())
     val host_saved = Output(Bool())
+
+    val stop_fetch = Output(Bool())
 
     // discard FTQ entries
     val context_redirect = Decoupled(UInt(log2Ceil(ftqSz).W))
@@ -73,7 +78,7 @@ class CoroController(implicit p: Parameters) extends BoomModule
   // active count to be used in this run
   val active_count = RegInit(0.U.asTypeOf(io.active_count))
 
-  val s_idle :: s_prepare_flush :: s_prepare_save :: s_prepare_redirect :: s_running :: Nil = Enum(5)
+  val s_idle :: s_prepare_flush :: s_prepare_save :: s_prepare_redirect :: s_running :: s_prepare_end :: s_join :: Nil = Enum(7)
   val state = RegInit(s_idle)
 
   // internal uops use the boundary uop's (run or ...) properties
@@ -92,6 +97,8 @@ class CoroController(implicit p: Parameters) extends BoomModule
 
   io.block_decode := true.B
   io.host_saved := false.B
+
+  io.stop_fetch := false.B
 
   io.context_redirect.valid := false.B
   io.context_redirect.bits := boundary_buffer.ftq_idx
@@ -199,7 +206,40 @@ class CoroController(implicit p: Parameters) extends BoomModule
       }
     }
     is (s_running) {
+      // SDM phase
       io.block_decode := false.B
+
+      when (io.last_end && !io.flush) {
+        state := s_prepare_end
+      }
     }
+    is (s_prepare_end) {
+      // wait for commit of the last END instruction and pipeline to be empty
+      io.block_decode := false.B
+      io.stop_fetch := true.B
+
+      when (io.end_commit.valid) {
+        // hmm... this may be changed as host's boundary
+        boundary_buffer := io.end_commit.bits
+        state := s_join
+      } .elsewhen (io.flush) {
+        // branch miss prediction or flush
+        state := s_running
+      }
+    }
+    is (s_join) {
+      io.stop_fetch := true.B
+    }
+  }
+
+  when (io.last_end) {
+    assert(state === s_running && !io.flush, "last END acceptance requires running without recovery")
+  }
+  when (io.end_commit.valid) {
+    assert(state === s_prepare_end, "last END commit requires an outstanding termination wait")
+    assert(io.end_commit.bits.uopc === uopSDM.END && io.end_commit.bits.sdm.last_end &&
+      io.end_commit.bits.sdm.context.is_coro && io.end_commit.bits.sdm.saved_tail.valid &&
+      !io.end_commit.bits.is_internal && io.end_commit.bits.is_unique && io.end_commit.bits.flush_on_commit,
+      "join requires the marked worker END")
   }
 }

@@ -52,6 +52,9 @@ class CoroController(implicit p: Parameters) extends BoomModule
     val block_decode = Output(Bool())
     val host_saved = Output(Bool())
 
+    // discard FTQ entries
+    val context_redirect = Decoupled(UInt(log2Ceil(ftqSz).W))
+
     // SDM csr
     val host_pc = Output(Valid(UInt(vaddrBitsExtended.W)))
     val entry_pc = Output(Vec(maxCoroContexts, UInt(vaddrBitsExtended.W)))
@@ -70,7 +73,7 @@ class CoroController(implicit p: Parameters) extends BoomModule
   // active count to be used in this run
   val active_count = RegInit(0.U.asTypeOf(io.active_count))
 
-  val s_idle :: s_prepare :: s_save_host :: s_enter_worker :: Nil = Enum(4)
+  val s_idle :: s_prepare_flush :: s_prepare_save :: s_prepare_redirect :: s_running :: Nil = Enum(5)
   val state = RegInit(s_idle)
 
   // internal uops use the boundary uop's (run or ...) properties
@@ -89,6 +92,9 @@ class CoroController(implicit p: Parameters) extends BoomModule
 
   io.block_decode := true.B
   io.host_saved := false.B
+
+  io.context_redirect.valid := false.B
+  io.context_redirect.bits := boundary_buffer.ftq_idx
 
   io.host_pc := host_pc
   io.entry_pc := entry_pc
@@ -157,11 +163,11 @@ class CoroController(implicit p: Parameters) extends BoomModule
         boundary_buffer := io.commit.bits
         host_pc.valid := false.B
 
-        state := s_prepare
+        state := s_prepare_flush
       }
     }
-    is (s_prepare) {
-      // wait to empty all pipeline
+    is (s_prepare_flush) {
+      // wait for commit of RUN instruction and pipeline to be empty
       when (run_redirect) {
         assert(io.redirect.valid, "run must produce its commit flush redirect")
 
@@ -172,20 +178,28 @@ class CoroController(implicit p: Parameters) extends BoomModule
       io.init.valid := host_pc.valid && io.pipeline_empty && !io.flush
 
       when (io.init.valid) {
-        state := s_save_host
+        state := s_prepare_save
       }
     }
-    is (s_save_host) {
+    is (s_prepare_save) {
       // save host registers into frame base's last frame
       io.boundary.valid := true.B
 
       when (!io.committed.dirty.orR && io.pipeline_empty && !io.flush) {
-        state := s_enter_worker
+        state := s_prepare_redirect
       }
     }
-    is (s_enter_worker) {
-      // ...
+    is (s_prepare_redirect) {
+      // discard FTQ entries younger than boundary_buffer.ftq_idx
       io.host_saved := true.B
+      io.context_redirect.valid := !io.flush
+
+      when (io.context_redirect.fire) {
+        state := s_running
+      }
+    }
+    is (s_running) {
+      io.block_decode := false.B
     }
   }
 }

@@ -14,14 +14,17 @@ class CoroPCBufferEntry(implicit p: Parameters) extends BoomBundle
   val active = UInt(maxCoroContexts.W)
 }
 
+class CoroPCBufferInit(implicit p: Parameters) extends BoomBundle
+{
+  val pc = Vec(maxCoroContexts, UInt(vaddrBitsExtended.W))
+  val active = UInt(maxCoroContexts.W)
+}
+
 class CoroPCBuffer(implicit p: Parameters) extends BoomModule
 {
   val io = IO(new BoomBundle {
     // initiate a run from the registered function PCs
-    val init = Input(Valid(new BoomBundle {
-      val pc     = Vec(maxCoroContexts, UInt(vaddrBitsExtended.W))
-      val active = UInt(maxCoroContexts.W)
-    }))
+    val init       = Input(Valid(new CoroPCBufferInit))
 
     val push       = Flipped(Decoupled(new CoroPCBufferEntry))
 

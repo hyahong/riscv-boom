@@ -303,6 +303,9 @@ class BoomFrontendIO(implicit p: Parameters) extends BoomBundle
   val redirect_ftq_idx = Output(UInt()) // Which ftq entry should we reset to?
   val redirect_ghist   = Output(new GlobalHistory) // What are we setting as the global history?
 
+  val context_init = Output(Valid(new CoroPCBufferInit))
+  val context_redirect = Decoupled(UInt(log2Ceil(ftqSz).W))
+
   val commit = Valid(UInt(ftqSz.W))
 
   val flush_icache = Output(Bool())
@@ -359,6 +362,34 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
   val bpd = Module(new BranchPredictor)
   bpd.io.f3_fire := false.B
   val ras = Module(new BoomRAS)
+
+  val coro_pc_buffer = if (enableSDM) Some(Module(new CoroPCBuffer)) else None
+  val target_pc = WireInit(0.U(vaddrBitsExtended.W))
+  val target_context = WireInit(0.U.asTypeOf(new SDMContextTag))
+  val target_ghist = WireInit(0.U.asTypeOf(new GlobalHistory))
+  target_context.is_coro := enableSDM.B
+
+  // in ROB flush, make the FTQ use this history
+  target_ghist.current_saw_branch_not_taken := true.B
+  io.cpu.context_redirect.ready := false.B
+  coro_pc_buffer.foreach { buffer =>
+    buffer.io.init := io.cpu.context_init
+    buffer.io.push.valid := false.B
+    buffer.io.push.bits := 0.U.asTypeOf(buffer.io.push.bits)
+    buffer.io.commit_tail := 0.U.asTypeOf(buffer.io.commit_tail)
+    buffer.io.rollback_tail := 0.U.asTypeOf(buffer.io.rollback_tail)
+    buffer.io.flush := false.B
+    buffer.io.target_cid := 0.U
+
+    target_pc := buffer.io.pc
+
+    io.cpu.context_redirect.ready := !reset.asBool && !io.cpu.context_init.valid &&
+      !io.cpu.sfence.valid && !io.cpu.redirect_flush && !io.cpu.redirect_val
+    when (io.cpu.context_redirect.fire) {
+      assert(buffer.io.active(0), "context entry requires an initialized active CID 0")
+    }
+  }
+  val context_redirect_fire = io.cpu.context_redirect.fire
 
   val icache = outer.icache.module
   icache.io.invalidate := io.cpu.flush_icache
@@ -1009,7 +1040,7 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
     s0_is_replay := false.B
     s0_is_sfence := true.B
 
-  }.elsewhen (io.cpu.redirect_flush) {
+  }.elsewhen (io.cpu.redirect_flush || context_redirect_fire) {
     fb.io.clear := true.B
     f4_clear    := true.B
     f3_clear    := true.B
@@ -1018,15 +1049,15 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
 
     f3_prev_is_half := false.B
 
-    s0_valid     := io.cpu.redirect_val
-    s0_vpc       := io.cpu.redirect_pc
-    if (enableSDM) s0_context := io.cpu.redirect_context
-    s0_ghist     := io.cpu.redirect_ghist
+    s0_valid     := io.cpu.redirect_val || context_redirect_fire
+    s0_vpc       := Mux(context_redirect_fire, target_pc, io.cpu.redirect_pc)
+    if (enableSDM) s0_context := Mux(context_redirect_fire, target_context, io.cpu.redirect_context)
+    s0_ghist     := Mux(context_redirect_fire, target_ghist, io.cpu.redirect_ghist)
     s0_tsrc      := BSRC_C
     s0_is_replay := false.B
 
-    ftq.io.redirect.valid := io.cpu.redirect_val
-    ftq.io.redirect.bits  := io.cpu.redirect_ftq_idx
+    ftq.io.redirect.valid := io.cpu.redirect_val || context_redirect_fire
+    ftq.io.redirect.bits  := Mux(context_redirect_fire, io.cpu.context_redirect.bits, io.cpu.redirect_ftq_idx)
   }
 
   ftq.io.debug_ftq_idx := io.cpu.debug_ftq_idx

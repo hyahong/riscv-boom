@@ -201,7 +201,20 @@ object CsrRRdDecode extends RRdDecodeConstants
          BitPat(uopCSRRCI)-> List(BR_N , Y, N, N, FN_ADD , DW_XPR, OP1_ZERO, OP2_IMMC, IS_I, REN_1, CSR.C),
 
          BitPat(uopWFI)   -> List(BR_N , Y, N, N, FN_ADD , DW_XPR, OP1_ZERO, OP2_IMMC, IS_I, REN_0, CSR.I),
-         BitPat(uopERET)  -> List(BR_N , Y, N, N, FN_ADD , DW_XPR, OP1_ZERO, OP2_IMMC, IS_I, REN_0, CSR.I))
+         BitPat(uopERET)  -> List(BR_N , Y, N, N, FN_ADD , DW_XPR, OP1_ZERO, OP2_IMMC, IS_I, REN_0, CSR.I),
+
+                                       // SDM uses CSR EXU to simplify the output path but never accesses a CSR
+                                       // br type
+                                       // |     use alu pipe             op1 sel   op2 sel
+                                       // |     |  use muldiv pipe       |         |         immsel       csr_cmd
+                                       // |     |  |  use mem pipe       |         |         |     rf wen |
+                                       // |     |  |  |  alu fcn wd/word?|         |         |     |      |
+                                       // |     |  |  |  |       |       |         |         |     |      |
+         BitPat(uopSDM.SET_FUNC)  -> List(BR_N, Y, N, N, FN_ADD, DW_XPR, OP1_RS1 , OP2_ZERO, IS_X, REN_0, CSR.N),
+         BitPat(uopSDM.SET_FRAME) -> List(BR_N, Y, N, N, FN_ADD, DW_XPR, OP1_RS1 , OP2_ZERO, IS_X, REN_0, CSR.N),
+         BitPat(uopSDM.SET_COUNT) -> List(BR_N, Y, N, N, FN_ADD, DW_XPR, OP1_RS1 , OP2_ZERO, IS_X, REN_0, CSR.N),
+         BitPat(uopSDM.RUN)       -> List(BR_N, Y, N, N, FN_ADD, DW_XPR, OP1_ZERO, OP2_ZERO, IS_X, REN_0, CSR.N))
+//         BitPat(uopSDM.END)       -> List(BR_N, Y, N, N, FN_ADD, DW_XPR, OP1_ZERO, OP2_ZERO, IS_X, REN_0, CSR.N)
 }
 
 /**

@@ -213,8 +213,8 @@ object CsrRRdDecode extends RRdDecodeConstants
          BitPat(uopSDM.SET_FUNC)  -> List(BR_N, Y, N, N, FN_ADD, DW_XPR, OP1_RS1 , OP2_ZERO, IS_X, REN_0, CSR.N),
          BitPat(uopSDM.SET_FRAME) -> List(BR_N, Y, N, N, FN_ADD, DW_XPR, OP1_RS1 , OP2_ZERO, IS_X, REN_0, CSR.N),
          BitPat(uopSDM.SET_COUNT) -> List(BR_N, Y, N, N, FN_ADD, DW_XPR, OP1_RS1 , OP2_ZERO, IS_X, REN_0, CSR.N),
-         BitPat(uopSDM.RUN)       -> List(BR_N, Y, N, N, FN_ADD, DW_XPR, OP1_ZERO, OP2_ZERO, IS_X, REN_0, CSR.N))
-//         BitPat(uopSDM.END)       -> List(BR_N, Y, N, N, FN_ADD, DW_XPR, OP1_ZERO, OP2_ZERO, IS_X, REN_0, CSR.N)
+         BitPat(uopSDM.RUN)       -> List(BR_N, Y, N, N, FN_ADD, DW_XPR, OP1_ZERO, OP2_ZERO, IS_X, REN_0, CSR.N),
+         BitPat(uopSDM.END)       -> List(BR_N, Y, N, N, FN_ADD, DW_XPR, OP1_ZERO, OP2_ZERO, IS_X, REN_0, CSR.N))
 }
 
 /**

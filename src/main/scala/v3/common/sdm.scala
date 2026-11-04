@@ -31,6 +31,7 @@ class SDMMicroOpMetadata(implicit p: Parameters) extends BoomBundle
 {
   val context    = new SDMContextTag
   val saved_tail = Valid(UInt(coroPCBufferPtrBits.W))
+  val last_end   = Bool()
 }
 
 object SDMFrame

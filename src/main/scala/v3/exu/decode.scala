@@ -409,8 +409,6 @@ object FDivSqrtDecode extends DecodeConstants
  */
 object SDMDecode extends DecodeConstants
 {
-  private val noExecutionUnit = 0.U(FUC_SZ.W)
-
   val table: Array[(BitPat, List[BitPat])] = Array(
                                //                                                                       frs3_en                        wakeup_delay
                                //                                                                       |  imm sel                     |  bypassable (aka, known/fixed latency)
@@ -427,8 +425,8 @@ object SDMDecode extends DecodeConstants
     SDMInstructions.SET_COUNT -> List(Y, N, N, uopSDM.SET_COUNT, IQT_INT, FU_CSR, RT_X, RT_FIX, RT_X  , N, IS_X, N, N, N, N, N, M_X, 0.U, N, N, N, Y, Y, CSR.N),
     SDMInstructions.RUN       -> List(Y, N, N, uopSDM.RUN      , IQT_INT, FU_CSR, RT_X, RT_X  , RT_X  , N, IS_X, N, N, N, N, N, M_X, 0.U, N, N, N, Y, Y, CSR.N),
 
-    // only the notify marked last by the controller gets unique/flush before dispatch
-    SDMInstructions.END       -> List(Y, N, N, uopSDM.END      , IQT_INT, noExecutionUnit, RT_X, RT_X  , RT_X  , N, IS_X, N, N, N, N, N, M_X, 0.U, N, N, N, N, N, CSR.N)
+    // only the END marked last gets unique/flush
+    SDMInstructions.END       -> List(Y, N, N, uopSDM.END      , IQT_INT, FU_CSR, RT_X, RT_X  , RT_X  , N, IS_X, N, N, N, N, N, M_X, 0.U, N, N, N, N, N, CSR.N)
   )
 }
 
@@ -622,6 +620,14 @@ class DecodeUnit(implicit p: Parameters) extends BoomModule
   uop.is_sys_pc2epc   := cs.is_sys_pc2epc
   uop.is_unique  := cs.inst_unique
   uop.flush_on_commit := cs.flush_on_commit || (csr_en && !csr_ren && io.csr_decode.write_flush)
+
+  if (enableSDM) {
+    when (cs.uopc === uopSDM.END && io.enq.uop.sdm.last_end) {
+      // wait for the pipeline to be empty if this is the last end
+      uop.is_unique := true.B
+      uop.flush_on_commit := true.B
+    }
+  }
 
   uop.bypassable   := cs.bypassable
 

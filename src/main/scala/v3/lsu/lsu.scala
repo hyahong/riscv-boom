@@ -87,8 +87,10 @@ class LSUDMemIO(implicit p: Parameters, edge: TLEdgeOut) extends BoomBundle()(p)
   val resp        = Flipped(Vec(memWidth, new ValidIO(new BoomDCacheResp)))
   // In our response stage, if we get a nack, we need to reexecute
   val nack        = Flipped(Vec(memWidth, new ValidIO(new BoomDCacheReq)))
+  // cacheable load accepted by MSHR in DCache S2 (allocation or merge)
+  val miss_ack    = Flipped(Vec(memWidth, Valid(new MicroOp)))
 
-  val brupdate       = Output(new BrUpdateInfo)
+  val brupdate     = Output(new BrUpdateInfo)
   val exception    = Output(Bool())
   val rob_pnr_idx  = Output(UInt(robAddrSz.W))
   val rob_head_idx = Output(UInt(robAddrSz.W))

@@ -49,16 +49,18 @@ class CoroController(implicit p: Parameters) extends BoomModule
     val committed = Input(new CoroRegisterStatus)
 
     val init = Output(Valid(new CoroRegisterStatus))
+
     // boundary for controller-issued internal uops
     val boundary = Output(Valid(new MicroOp))
+    val boundary_type = Output(CoroBoundaryType())
 
     val block_decode = Output(Bool())
     val host_saved = Output(Bool())
 
     val stop_fetch = Output(Bool())
 
-    // discard FTQ entries
-    val context_redirect = Decoupled(UInt(log2Ceil(ftqSz).W))
+    // redirect to new context or host
+    val context_redirect = Decoupled(new CoroContextRedirect)
 
     // SDM csr
     val host_pc = Output(Valid(UInt(vaddrBitsExtended.W)))
@@ -78,7 +80,16 @@ class CoroController(implicit p: Parameters) extends BoomModule
   // active count to be used in this run
   val active_count = RegInit(0.U.asTypeOf(io.active_count))
 
-  val s_idle :: s_prepare_flush :: s_prepare_save :: s_prepare_redirect :: s_running :: s_prepare_end :: s_join :: Nil = Enum(7)
+  // s_idle     : host
+  // s_fork_1   : wait for commit of RUN instruction (boundary)
+  // s_fork_2   : save host registers to frame
+  // s_fork_3   : redirect to the context
+  // s_running  : SDM
+  // s_join_0   : wait for commit of END instruction (can be squashed)
+  // s_join_1   : wait for the pipeline to flush all
+  // s_join_2   : restore host registers from frame
+  // s_join_3   : redirect to the host
+  val s_idle :: s_fork_1 :: s_fork_2 :: s_fork_3 :: s_running :: s_join_0 :: s_join_1 :: s_join_2 :: s_join_3 :: Nil = Enum(9)
   val state = RegInit(s_idle)
 
   // internal uops use the boundary uop's (run or ...) properties
@@ -94,6 +105,7 @@ class CoroController(implicit p: Parameters) extends BoomModule
 
   io.boundary.valid := false.B
   io.boundary.bits := boundary_buffer
+  io.boundary_type := CoroBoundaryType.SAVE
 
   io.block_decode := true.B
   io.host_saved := false.B
@@ -101,7 +113,10 @@ class CoroController(implicit p: Parameters) extends BoomModule
   io.stop_fetch := false.B
 
   io.context_redirect.valid := false.B
-  io.context_redirect.bits := boundary_buffer.ftq_idx
+  io.context_redirect.bits.context := 0.U.asTypeOf(new SDMContextTag)
+  io.context_redirect.bits.context.is_coro := true.B
+  io.context_redirect.bits.ftq_idx := boundary_buffer.ftq_idx
+  io.context_redirect.bits.host_pc := host_pc.bits
 
   io.host_pc := host_pc
   io.entry_pc := entry_pc
@@ -159,8 +174,9 @@ class CoroController(implicit p: Parameters) extends BoomModule
 
   switch (state) {
     is (s_idle) {
-      // host, not SDM
+      // host
       io.block_decode := false.B
+
       when (run_commit) {
         assert(frame_base.valid && active_count.valid, "run requires frame and count configuration")
         for (cid <- 0 until maxCoroContexts) {
@@ -170,10 +186,10 @@ class CoroController(implicit p: Parameters) extends BoomModule
         boundary_buffer := io.commit.bits
         host_pc.valid := false.B
 
-        state := s_prepare_flush
+        state := s_fork_1
       }
     }
-    is (s_prepare_flush) {
+    is (s_fork_1) {
       // wait for commit of RUN instruction and pipeline to be empty
       when (run_redirect) {
         assert(io.redirect.valid, "run must produce its commit flush redirect")
@@ -185,18 +201,18 @@ class CoroController(implicit p: Parameters) extends BoomModule
       io.init.valid := host_pc.valid && io.pipeline_empty && !io.flush
 
       when (io.init.valid) {
-        state := s_prepare_save
+        state := s_fork_2
       }
     }
-    is (s_prepare_save) {
+    is (s_fork_2) {
       // save host registers into frame base's last frame
       io.boundary.valid := true.B
 
       when (!io.committed.dirty.orR && io.pipeline_empty && !io.flush) {
-        state := s_prepare_redirect
+        state := s_fork_3
       }
     }
-    is (s_prepare_redirect) {
+    is (s_fork_3) {
       // discard FTQ entries younger than boundary_buffer.ftq_idx
       io.host_saved := true.B
       io.context_redirect.valid := !io.flush
@@ -206,14 +222,14 @@ class CoroController(implicit p: Parameters) extends BoomModule
       }
     }
     is (s_running) {
-      // SDM phase
+      // SDM
       io.block_decode := false.B
 
       when (io.last_end && !io.flush) {
-        state := s_prepare_end
+        state := s_join_0
       }
     }
-    is (s_prepare_end) {
+    is (s_join_0) {
       // wait for commit of the last END instruction and pipeline to be empty
       io.block_decode := false.B
       io.stop_fetch := true.B
@@ -221,14 +237,44 @@ class CoroController(implicit p: Parameters) extends BoomModule
       when (io.end_commit.valid) {
         // hmm... this may be changed as host's boundary
         boundary_buffer := io.end_commit.bits
-        state := s_join
+        state := s_join_1
       } .elsewhen (io.flush) {
         // branch miss prediction or flush
         state := s_running
       }
     }
-    is (s_join) {
+    is (s_join_1) {
+      // wait for flush_on_commit that the last end has
       io.stop_fetch := true.B
+
+      when (io.pipeline_empty && !io.flush) {
+        state := s_join_2
+      }
+    }
+    is (s_join_2) {
+      io.stop_fetch := true.B
+
+      io.boundary.valid := true.B
+      io.boundary_type := CoroBoundaryType.RESTORE
+
+      // restore the host's frame and mapping
+      io.boundary.bits.sdm.context := 0.U.asTypeOf(new SDMContextTag)
+
+      val restored = !io.committed.context.is_coro &&
+        io.committed.valid === ((BigInt(1) << coroNumIntRegisters) - 2).U
+      when (restored && io.pipeline_empty && !io.flush) {
+        state := s_join_3
+      }
+    }
+    is (s_join_3) {
+      io.context_redirect.valid := !io.flush
+      io.context_redirect.bits.context.is_coro := false.B
+      io.stop_fetch := !io.context_redirect.fire
+
+      when (io.context_redirect.fire) {
+        assert(host_pc.valid, "host return requires the saved RUN")
+        state := s_idle
+      }
     }
   }
 
@@ -236,7 +282,7 @@ class CoroController(implicit p: Parameters) extends BoomModule
     assert(state === s_running && !io.flush, "last END acceptance requires running without recovery")
   }
   when (io.end_commit.valid) {
-    assert(state === s_prepare_end, "last END commit requires an outstanding termination wait")
+    assert(state === s_join_0, "last END commit requires an outstanding termination wait")
     assert(io.end_commit.bits.uopc === uopSDM.END && io.end_commit.bits.sdm.last_end &&
       io.end_commit.bits.sdm.context.is_coro && io.end_commit.bits.sdm.saved_tail.valid &&
       !io.end_commit.bits.is_internal && io.end_commit.bits.is_unique && io.end_commit.bits.flush_on_commit,

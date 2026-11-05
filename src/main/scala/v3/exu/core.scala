@@ -390,6 +390,18 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
   io.ifu.context_init           := 0.U.asTypeOf(io.ifu.context_init)
   io.ifu.context_redirect.valid := false.B
   io.ifu.context_redirect.bits  := 0.U
+  io.ifu.context_commit_tail    := 0.U.asTypeOf(io.ifu.context_commit_tail)
+  io.ifu.context_flush          := enableSDM.B && rob.io.flush.valid
+  io.ifu.stop_fetch             := false.B
+
+  if (enableSDM) {
+    for (w <- 0 until coreWidth) {
+      val uop = rob.io.commit.uops(w)
+      when (rob.io.commit.valids(w) && !uop.is_internal && uop.sdm.context.is_coro && uop.sdm.saved_tail.valid) {
+        io.ifu.context_commit_tail := uop.sdm.saved_tail
+      }
+    }
+  }
 
   // Breakpoint info
   io.ifu.status  := csr.io.status
@@ -591,6 +603,7 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
 
   val ren1_kill = rob.io.commit.rollback || brupdate.b1.mispredict_mask.orR ||
     brupdate.b2.mispredict || io.ifu.redirect_flush || (enableSDM.B && rob.io.flush.valid)
+  io.ifu.context_kill := enableSDM.B && ren1_kill
 
   if (enableSDM) {
     val expander = coro_expander.get
@@ -1081,11 +1094,19 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
       rob.io.commit.valids(w) && CoroController.isCommand(rob.io.commit.uops(w)))
     controller.io.commit.valid := commands.reduce(_ || _)
     controller.io.commit.bits := Mux1H(commands, rob.io.commit.uops)
+    val ends = (0 until coreWidth).map(w => rob.io.commit.valids(w) &&
+      !rob.io.commit.uops(w).is_internal && rob.io.commit.uops(w).uopc === uopSDM.END &&
+      rob.io.commit.uops(w).sdm.last_end)
+    controller.io.end_commit.valid := ends.reduce(_ || _)
+    controller.io.end_commit.bits := Mux1H(ends, rob.io.commit.uops)
+    controller.io.last_end := io.ifu.last_end
     controller.io.flush := ren1_kill
     controller.io.redirect.valid := io.ifu.redirect_val && io.ifu.redirect_flush
     controller.io.redirect.bits := io.ifu.redirect_pc
     controller.io.pipeline_empty := rob.io.empty && rob.io.ready && io.lsu.fencei_rdy
     controller.io.committed := coro_register_state.get.io.committed
+
+    io.ifu.stop_fetch := controller.io.stop_fetch
 
     io.ifu.context_init.valid := controller.io.init.valid
     io.ifu.context_init.bits.pc := controller.io.entry_pc

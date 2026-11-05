@@ -27,6 +27,20 @@ class SDMContextTag(implicit p: Parameters) extends BoomBundle
   val cid     = UInt(coroIdxBits.W) // maxCoroContexts=1 needs no index bit
 }
 
+object CoroBoundaryType extends ChiselEnum
+{
+  val SAVE, RESTORE = Value
+}
+
+class CoroContextRedirect(implicit p: Parameters) extends BoomBundle
+{
+  val context = new SDMContextTag
+  val ftq_idx = UInt(log2Ceil(ftqSz).W)
+
+  // context.is_coro is false, redirect to host
+  val host_pc = UInt(vaddrBitsExtended.W)
+}
+
 class SDMMicroOpMetadata(implicit p: Parameters) extends BoomBundle
 {
   val context    = new SDMContextTag

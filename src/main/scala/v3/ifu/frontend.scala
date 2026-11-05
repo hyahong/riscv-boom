@@ -954,6 +954,7 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
   val f3_has_end = f3_end_mask.asUInt.orR
   val f3_end_idx = PriorityEncoder(f3_end_mask)
   val f3_transition_ready = WireInit(true.B)
+  val end_fire = WireInit(false.B)
   val last_end_fire = WireInit(false.B)
   coro_transition.foreach { transition =>
     val buffer = coro_pc_buffer.get
@@ -969,11 +970,19 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
     transition.io.request.bits.pc := f3_aligned_pc + (f3_end_idx << 1) + Mux(end_is_edge, 2.U, 4.U)
     transition.io.request.bits.is_end := true.B
 
-    transition.io.response.ready := f4.io.enq.ready && transition.io.response.bits.last_end
-    f3_transition_ready := !io.cpu.stop_fetch && (!f3_has_end ||
-      (transition.io.response.valid && transition.io.response.bits.last_end))
-    last_end_fire := transition.io.response.fire
+    transition.io.response.ready := f4.io.enq.ready && !f3_clear
+    f3_transition_ready := !io.cpu.stop_fetch && (!f3_has_end || transition.io.response.valid)
+    end_fire := transition.io.response.fire
+    last_end_fire := end_fire && transition.io.response.bits.last_end
     io.cpu.last_end := last_end_fire
+
+    // pre-lookup the next context information
+    when (!io.cpu.context_redirect.valid) {
+      buffer.io.target_cid := transition.io.response.bits.next_cid.bits
+      target_context.is_coro := true.B
+      target_context.cid := transition.io.response.bits.next_cid.bits
+      target_ghist := f3_predicted_ghist
+    }
 
     val transition_idx = Wire(Valid(UInt(log2Ceil(fetchWidth).W)))
     transition_idx.valid := f3_has_end
@@ -982,13 +991,16 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
     f3_fetch_bundle.last_end.valid := f3_has_end && transition.io.response.bits.last_end
     f3_fetch_bundle.last_end.bits := f3_end_idx
 
-    when (transition.io.request.valid && !transition.io.kill && !reset.asBool) {
-      assert(transition.io.response.bits.last_end,
-        "non-last END transitions are not implemented yet")
+    when (f3_has_end) {
+      // we don't need this
+      f3_fetch_bundle.sfbs.foreach(_ := false.B)
+      f3_fetch_bundle.end_half.valid := false.B
     }
-    when (last_end_fire) {
+    when (end_fire) {
       assert(f3.io.deq.fire && f4.io.enq.fire && buffer.io.push.fire,
         "END and journal entry must be accepted together")
+      assert(transition.io.response.bits.last_end ^ transition.io.response.bits.next_cid.valid,
+        "END must either select a worker or terminate the run")
     }
   }
 
@@ -1090,12 +1102,23 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
 
   // Preserve F4/FetchBuffer's accepted prefix, but discard speculative fetches after END.
   // Do not reset F3 here: its current packet must still transfer to F4 this cycle.
-  when (last_end_fire || (enableSDM.B && io.cpu.stop_fetch)) {
+  when (end_fire || (enableSDM.B && io.cpu.stop_fetch)) {
     f1_clear := true.B
     f2_clear := true.B
     f3.io.enq.valid := false.B
     f3_prev_is_half := false.B
     s0_valid := false.B
+  }
+
+  // switch to the next context
+  when (end_fire && !last_end_fire) {
+    s0_valid     := true.B
+    s0_vpc       := target_pc
+    s0_context   := target_context
+    s0_ghist     := target_ghist
+    s0_is_replay := false.B
+    s0_tsrc      := BSRC_3
+    f3_fetch_bundle.fsrc := BSRC_3
   }
 
   when (io.cpu.sfence.valid) {

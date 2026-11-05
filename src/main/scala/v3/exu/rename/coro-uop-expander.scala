@@ -83,7 +83,7 @@ object CoroUopExpander
   }
 
   private def expansionPlan(pending: Vec[Valid[MicroOp]], state: CoroRegisterStatus, last_origin: Valid[MicroOp],
-    boundary: Valid[MicroOp], enable: Bool)(implicit p: Parameters): Vec[Valid[CoroExpansionStep]] = {
+    boundary: Valid[MicroOp], boundary_type: CoroBoundaryType.Type, enable: Bool)(implicit p: Parameters): Vec[Valid[CoroExpansionStep]] = {
     val width = pending.length
     val plan = Wire(Vec(width, Valid(new CoroExpansionStep)))
     val available = Wire(Vec(width + 1, UInt(width.W)))
@@ -101,19 +101,22 @@ object CoroUopExpander
 
     for (w <- 0 until width) {
       val oldest = PriorityEncoderOH(available(w))
-      val original = Mux1H(oldest, pending.map(_.bits))
+      val original = Mux(boundary.valid, boundary.bits, Mux1H(oldest, pending.map(_.bits)))
       val same_context = sameContext(context(w), original.sdm.context)
-      val save = (boundary.valid || !same_context) && dirty(w).orR
+      val force_restore = boundary.valid && boundary_type === CoroBoundaryType.RESTORE
+      val save = !force_restore && (boundary.valid || !same_context) && dirty(w).orR
       val save_lreg = PriorityEncoder(dirty(w))
       val source_valid = Mux(same_context, valid(w), 0.U)
+      val missing = ~source_valid & ((BigInt(1) << state.coroNumIntRegisters) - 2).U(state.coroNumIntRegisters.W)
       val rs1 = original.lrs1(reg_bits - 1, 0)
       val rs2 = original.lrs2(reg_bits - 1, 0)
       val restore_rs1 = original.lrs1_rtype === RT_FIX && rs1 =/= 0.U && !source_valid(rs1)
       val restore_rs2 = original.lrs2_rtype === RT_FIX && rs2 =/= 0.U && !source_valid(rs2)
-      val restore = !save && original.sdm.context.is_coro && !original.exception && (restore_rs1 || restore_rs2)
-      val restore_lreg = Mux(restore_rs1, rs1, rs2)
+      val restore = !save && (force_restore ||
+        (original.sdm.context.is_coro && !original.exception && (restore_rs1 || restore_rs2)))
+      val restore_lreg = Mux(force_restore, PriorityEncoder(missing), Mux(restore_rs1, rs1, rs2))
 
-      plan(w).valid := Mux(boundary.valid, dirty(w).orR, available(w).orR)
+      plan(w).valid := Mux(boundary.valid, Mux(force_restore, missing.orR, dirty(w).orR), available(w).orR)
       plan(w).bits.use_original := !(save || restore)
       plan(w).bits.uop := Mux(save, saveUop(origin(w).bits, save_lreg), restoreUop(original, restore_lreg))
       available(w + 1) := available(w) & ~Mux(save || restore, 0.U(width.W), oldest)
@@ -160,6 +163,7 @@ class CoroUopExpander(implicit p: Parameters) extends BoomModule
 
     // boundary for controller-issued internal uops
     val boundary = Input(Valid(new MicroOp))
+    val boundary_type = Input(CoroBoundaryType())
 
     val fire = Input(Vec(coreWidth, Bool()))
 
@@ -186,14 +190,16 @@ class CoroUopExpander(implicit p: Parameters) extends BoomModule
     pending(w).bits := originals(w)
   }
   // stalled suffix keeps its plan until every output has been processed
-  val plan_fire = live && (original_valids.orR || (io.boundary.valid && io.register_state.dirty.orR)) && !holding
   val origin = Wire(Valid(new MicroOp))
   origin.valid := last_origin_valid
   origin.bits := last_origin
-  val plan = CoroUopExpander.expansionPlan(pending, io.register_state, origin, io.boundary, plan_fire)
+  val plan = CoroUopExpander.expansionPlan(pending, io.register_state, origin,
+    io.boundary, io.boundary_type, live && !holding)
+  val expansion_valids = VecInit(plan.map(_.valid)).asUInt
+  val plan_fire = live && !holding && plan(0).valid
 
   when (live && io.boundary.valid) {
-    assert(!original_valids.orR, "controller save requires the original packet to be drained")
+    assert(!original_valids.orR, "controller save/restore requires the original packet to be drained")
   }
 
   val available = Wire(Vec(coreWidth + 1, UInt(coreWidth.W)))
@@ -211,14 +217,13 @@ class CoroUopExpander(implicit p: Parameters) extends BoomModule
     io.out(w).bits := Mux(holding, held_uops(w), expanded(w))
 
     when (plan_fire && step.valid) {
-      assert(io.boundary.valid || available(w).orR, "expansion step requires an original or controller save")
+      assert(io.boundary.valid || available(w).orR, "expansion step requires an original or controller boundary")
       when (!step.bits.use_original) {
         assert(step.bits.uop.is_internal, "inserted uop must be internal")
       }
     }
   }
 
-  val expansion_valids = VecInit(plan.map(_.valid)).asUInt
   val output_valids = Mux(holding, held_valids, Mux(plan_fire, expansion_valids, 0.U))
   val fired = io.fire.asUInt & output_valids & Fill(coreWidth, live)
   val consumed = (0 until coreWidth).map { w =>
@@ -269,8 +274,5 @@ class CoroUopExpander(implicit p: Parameters) extends BoomModule
         assert(!io.in.bits(w).bits.is_internal, "expander input must contain original uops")
       }
     }
-  }
-  when (plan_fire) {
-    assert(expansion_valids.orR, "expansion packet must not be empty")
   }
 }

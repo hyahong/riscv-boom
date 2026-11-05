@@ -389,7 +389,7 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
   io.ifu.redirect_context       := 0.U.asTypeOf(io.ifu.redirect_context)
   io.ifu.context_init           := 0.U.asTypeOf(io.ifu.context_init)
   io.ifu.context_redirect.valid := false.B
-  io.ifu.context_redirect.bits  := 0.U
+  io.ifu.context_redirect.bits  := 0.U.asTypeOf(io.ifu.context_redirect.bits)
   io.ifu.context_commit_tail    := 0.U.asTypeOf(io.ifu.context_commit_tail)
   io.ifu.context_flush          := enableSDM.B && rob.io.flush.valid
   io.ifu.stop_fetch             := false.B
@@ -611,6 +611,7 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
     expander.io.in.valid := dec_valids.asUInt.orR && !ren1_kill && !coro_controller.get.io.block_decode
     expander.io.register_state := coro_register_state.get.io.speculative
     expander.io.boundary := coro_controller.get.io.boundary
+    expander.io.boundary_type := coro_controller.get.io.boundary_type
 
     for (w <- 0 until coreWidth) {
       expander.io.in.bits(w).valid := dec_valids(w)

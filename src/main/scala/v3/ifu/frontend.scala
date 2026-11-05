@@ -305,7 +305,7 @@ class BoomFrontendIO(implicit p: Parameters) extends BoomBundle
   val redirect_ghist   = Output(new GlobalHistory) // What are we setting as the global history?
 
   val context_init = Output(Valid(new CoroPCBufferInit))
-  val context_redirect = Decoupled(UInt(log2Ceil(ftqSz).W))
+  val context_redirect = Decoupled(new CoroContextRedirect)
   val context_commit_tail = Output(Valid(UInt(coroPCBufferPtrBits.W)))
   val context_flush = Output(Bool())
   val context_kill = Output(Bool())
@@ -375,7 +375,6 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
   val target_pc = WireInit(0.U(vaddrBitsExtended.W))
   val target_context = WireInit(0.U.asTypeOf(new SDMContextTag))
   val target_ghist = WireInit(0.U.asTypeOf(new GlobalHistory))
-  target_context.is_coro := enableSDM.B
 
   // in ROB flush, make the FTQ use this history
   target_ghist.current_saw_branch_not_taken := true.B
@@ -389,14 +388,15 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
       !RegNext(io.cpu.context_flush, false.B) && io.cpu.brupdate.b2.uop.sdm.saved_tail.valid
     buffer.io.rollback_tail.bits := io.cpu.brupdate.b2.uop.sdm.saved_tail.bits
     buffer.io.flush := io.cpu.context_flush
-    buffer.io.target_cid := 0.U
+    buffer.io.target_cid := io.cpu.context_redirect.bits.context.cid
 
-    target_pc := buffer.io.pc
+    target_context := io.cpu.context_redirect.bits.context
+    target_pc := Mux(target_context.is_coro, buffer.io.pc, io.cpu.context_redirect.bits.host_pc)
 
     io.cpu.context_redirect.ready := !reset.asBool && !io.cpu.context_init.valid &&
       !io.cpu.sfence.valid && !io.cpu.redirect_flush && !io.cpu.redirect_val
-    when (io.cpu.context_redirect.fire) {
-      assert(buffer.io.active(0), "context entry requires an initialized active CID 0")
+    when (io.cpu.context_redirect.fire && target_context.is_coro) {
+      assert(buffer.io.active(buffer.io.target_cid), "context entry requires an active CID")
     }
   }
   val context_redirect_fire = io.cpu.context_redirect.fire
@@ -1127,7 +1127,7 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
     s0_is_replay := false.B
 
     ftq.io.redirect.valid := io.cpu.redirect_val || context_redirect_fire
-    ftq.io.redirect.bits  := Mux(context_redirect_fire, io.cpu.context_redirect.bits, io.cpu.redirect_ftq_idx)
+    ftq.io.redirect.bits  := Mux(context_redirect_fire, io.cpu.context_redirect.bits.ftq_idx, io.cpu.redirect_ftq_idx)
   }
 
   // END's commit flush still repairs the FTQ, but must not fetch END + 4 during join.

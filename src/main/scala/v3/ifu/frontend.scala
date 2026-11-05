@@ -951,6 +951,47 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
   val fb  = Module(new FetchBuffer)
   val ftq = Module(new FetchTargetQueue)
 
+  val f3_has_end = f3_end_mask.asUInt.orR
+  val f3_end_idx = PriorityEncoder(f3_end_mask)
+  val f3_transition_ready = WireInit(true.B)
+  val last_end_fire = WireInit(false.B)
+  coro_transition.foreach { transition =>
+    val buffer = coro_pc_buffer.get
+    transition.io.active := buffer.io.active
+    transition.io.kill := io.cpu.context_init.valid || io.cpu.context_flush || io.cpu.context_kill ||
+      io.cpu.redirect_flush || io.cpu.redirect_val || io.cpu.sfence.valid || context_redirect_fire ||
+      io.cpu.stop_fetch
+    transition.io.request.valid := f3.io.deq.valid && f3_has_end
+    transition.io.request.bits.cid := f3_imemresp.context.cid
+    val end_bank = if (nBanks == 1) 0.U else f3_end_idx(log2Ceil(fetchWidth) - 1)
+    val end_is_edge = f3_end_idx(log2Ceil(bankWidth) - 1, 0) === 0.U &&
+      f3_fetch_bundle.edge_inst(end_bank)
+    transition.io.request.bits.pc := f3_aligned_pc + (f3_end_idx << 1) + Mux(end_is_edge, 2.U, 4.U)
+    transition.io.request.bits.is_end := true.B
+
+    transition.io.response.ready := f4.io.enq.ready && transition.io.response.bits.last_end
+    f3_transition_ready := !io.cpu.stop_fetch && (!f3_has_end ||
+      (transition.io.response.valid && transition.io.response.bits.last_end))
+    last_end_fire := transition.io.response.fire
+    io.cpu.last_end := last_end_fire
+
+    val transition_idx = Wire(Valid(UInt(log2Ceil(fetchWidth).W)))
+    transition_idx.valid := f3_has_end
+    transition_idx.bits := f3_end_idx
+    f3_fetch_bundle.setSavedTail(buffer.io.tail, transition_idx)
+    f3_fetch_bundle.last_end.valid := f3_has_end && transition.io.response.bits.last_end
+    f3_fetch_bundle.last_end.bits := f3_end_idx
+
+    when (transition.io.request.valid && !transition.io.kill && !reset.asBool) {
+      assert(transition.io.response.bits.last_end,
+        "non-last END transitions are not implemented yet")
+    }
+    when (last_end_fire) {
+      assert(f3.io.deq.fire && f4.io.enq.fire && buffer.io.push.fire,
+        "END and journal entry must be accepted together")
+    }
+  }
+
   // at a context boundary, use normal branch handling instead of SFB
   val f4_sfb_context_match = !f4.io.enq.valid ||
     sameContext(f4.io.deq.bits.context, f3_imemresp.context)
@@ -968,6 +1009,7 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
   })
   val f4_sfbs = VecInit((0 until fetchWidth) map { i =>
     enableSFBOpt.B &&
+    !f4.io.deq.bits.last_end.valid && !f3_has_end &&
     f4_sfb_context_match &&
     ((~f4_shadowable_masks(i) === 0.U) &&
      (~f3_shadowable_masks(i) === 0.U) &&
@@ -987,6 +1029,7 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
   val f4_sfb_mask  = f4.io.deq.bits.sfb_masks(f4_sfb_idx)
   // If we have a SFB, wait for next fetch to be available in f3
   val f4_delay     = (
+    !f4.io.deq.bits.last_end.valid &&
     f4.io.deq.bits.sfbs.reduce(_||_) &&
     !f4.io.deq.bits.cfi_idx.valid &&
     !f4.io.enq.valid &&
@@ -999,8 +1042,8 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
     f3_shadowed_mask := VecInit(0.U(fetchWidth.W).asBools)
   }
 
-  f4_ready := f4.io.enq.ready
-  f4.io.enq.valid := f3.io.deq.valid && !f3_clear
+  f4_ready := f4.io.enq.ready && f3_transition_ready
+  f4.io.enq.valid := f3.io.deq.valid && !f3_clear && f3_transition_ready
   f4.io.enq.bits  := f3_fetch_bundle
   f4.io.deq.ready := fb.io.enq.ready && ftq.io.enq.ready && !f4_delay
 
@@ -1045,6 +1088,16 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
   ftq.io.redirect.bits    := io.cpu.redirect_ftq_idx
   fb.io.clear := false.B
 
+  // Preserve F4/FetchBuffer's accepted prefix, but discard speculative fetches after END.
+  // Do not reset F3 here: its current packet must still transfer to F4 this cycle.
+  when (last_end_fire || (enableSDM.B && io.cpu.stop_fetch)) {
+    f1_clear := true.B
+    f2_clear := true.B
+    f3.io.enq.valid := false.B
+    f3_prev_is_half := false.B
+    s0_valid := false.B
+  }
+
   when (io.cpu.sfence.valid) {
     fb.io.clear := true.B
     f4_clear    := true.B
@@ -1075,6 +1128,11 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
 
     ftq.io.redirect.valid := io.cpu.redirect_val || context_redirect_fire
     ftq.io.redirect.bits  := Mux(context_redirect_fire, io.cpu.context_redirect.bits, io.cpu.redirect_ftq_idx)
+  }
+
+  // END's commit flush still repairs the FTQ, but must not fetch END + 4 during join.
+  when (enableSDM.B && io.cpu.stop_fetch) {
+    s0_valid := false.B
   }
 
   ftq.io.debug_ftq_idx := io.cpu.debug_ftq_idx

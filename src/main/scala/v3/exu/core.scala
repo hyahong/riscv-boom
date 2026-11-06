@@ -390,8 +390,9 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
   io.ifu.context_init           := 0.U.asTypeOf(io.ifu.context_init)
   io.ifu.context_redirect.valid := false.B
   io.ifu.context_redirect.bits  := 0.U.asTypeOf(io.ifu.context_redirect.bits)
-  io.ifu.context_resume.valid   := false.B
-  io.ifu.context_resume.bits    := 0.U.asTypeOf(io.ifu.context_resume.bits)
+  io.ifu.context_transition_request.valid := false.B
+  io.ifu.context_transition_request.bits := 0.U.asTypeOf(io.ifu.context_transition_request.bits)
+  io.ifu.context_transition_response.ready := false.B
   io.ifu.context_commit_tail    := 0.U.asTypeOf(io.ifu.context_commit_tail)
   io.ifu.context_flush          := enableSDM.B && rob.io.flush.valid
   io.ifu.stop_fetch             := false.B
@@ -1131,7 +1132,8 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
     io.ifu.context_redirect.valid := controller.io.context_redirect.valid
     io.ifu.context_redirect.bits := controller.io.context_redirect.bits
     controller.io.context_redirect.ready := io.ifu.context_redirect.ready
-    io.ifu.context_resume <> controller.io.resume_pc
+    io.ifu.context_transition_request <> controller.io.transition_request
+    controller.io.transition_response <> io.ifu.context_transition_response
 
     when (controller.io.commit.valid && controller.io.commit.bits.uopc === uopSDM.RUN) {
       assert(!csr.io.status.mie, "run requires maskable interrupts to be disabled")

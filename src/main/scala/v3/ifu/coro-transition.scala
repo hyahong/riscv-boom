@@ -13,6 +13,8 @@ class CoroTransitionRequest(implicit p: Parameters) extends BoomBundle
   val pc          = UInt(vaddrBitsExtended.W)
 
   val is_end      = Bool()
+  // confirmed miss record its resume PC. wait if the journal is full.
+  val confirmed   = Bool()
 }
 
 class CoroTransitionResponse(implicit p: Parameters) extends BoomBundle
@@ -46,7 +48,8 @@ class CoroTransition(implicit p: Parameters) extends BoomModule
   scheduler.io.current_cid := request.cid
   scheduler.io.active      := next_active
 
-  val skip = !request.is_end && (!scheduler.io.next_cid.valid || !io.entry.ready)
+  val skip = !request.is_end && !request.confirmed &&
+    (!scheduler.io.next_cid.valid || !io.entry.ready)
   val can_advance = skip || io.entry.ready
   val live = !io.kill && !reset.asBool
 

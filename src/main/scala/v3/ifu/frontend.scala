@@ -306,7 +306,8 @@ class BoomFrontendIO(implicit p: Parameters) extends BoomBundle
 
   val context_init = Output(Valid(new CoroPCBufferInit))
   val context_redirect = Decoupled(new CoroContextRedirect)
-  val context_resume = Decoupled(new CoroPCBufferEntry)
+  val context_transition_request = Decoupled(new CoroTransitionRequest)
+  val context_transition_response = Flipped(Decoupled(new CoroTransitionResponse))
   val context_commit_tail = Output(Valid(UInt(coroPCBufferPtrBits.W)))
   val context_committed_active = Input(UInt(maxCoroContexts.W))
   val context_flush = Output(Bool())
@@ -381,22 +382,19 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
   // in ROB flush, make the FTQ use this history
   target_ghist.current_saw_branch_not_taken := true.B
   io.cpu.context_redirect.ready := false.B
-  io.cpu.context_resume.ready := false.B
+  io.cpu.context_transition_request.ready := false.B
+  io.cpu.context_transition_response.valid := false.B
+  io.cpu.context_transition_response.bits := 0.U.asTypeOf(io.cpu.context_transition_response.bits)
   io.cpu.last_end := false.B
   io.cpu.context_committed_active := 0.U
   coro_pc_buffer.foreach { buffer =>
     buffer.io.init := io.cpu.context_init
-    val entry = coro_transition.get.io.entry
-    val resume = io.cpu.context_resume
-    val resume_allowed = !io.cpu.context_kill && !io.cpu.redirect_flush &&
-      !io.cpu.redirect_val && !io.cpu.sfence.valid
-    buffer.io.push.valid := Mux(resume.valid, resume_allowed, entry.valid)
-    buffer.io.push.bits := Mux(resume.valid, resume.bits, entry.bits)
-    entry.ready := buffer.io.push.ready && !resume.valid
-    resume.ready := buffer.io.push.ready && resume_allowed
+    buffer.io.push <> coro_transition.get.io.entry
     buffer.io.commit_tail := io.cpu.context_commit_tail
-    when (resume.fire) {
+    when (io.cpu.context_transition_response.fire) {
       assert(!io.cpu.context_commit_tail.valid, "resume record requires completed ROB recovery")
+      assert(buffer.io.push.fire && io.cpu.context_transition_response.bits.recorded,
+        "confirmed resume record and response must be accepted together")
 
       buffer.io.commit_tail.valid := true.B
       buffer.io.commit_tail.bits := buffer.io.tail + 1.U
@@ -976,10 +974,13 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
   val last_end_fire = WireInit(false.B)
   coro_transition.foreach { transition =>
     val buffer = coro_pc_buffer.get
-    transition.io.active := buffer.io.active
+    val request = io.cpu.context_transition_request
+    val response = io.cpu.context_transition_response
+    val confirmed = request.valid
+    transition.io.active := Mux(confirmed, buffer.io.committed_active, buffer.io.active)
     transition.io.kill := io.cpu.context_init.valid || io.cpu.context_flush || io.cpu.context_kill ||
       io.cpu.redirect_flush || io.cpu.redirect_val || io.cpu.sfence.valid || context_redirect_fire ||
-      io.cpu.stop_fetch || io.cpu.context_resume.valid
+      (!confirmed && io.cpu.stop_fetch)
     transition.io.request.valid := f3.io.deq.valid && f3_has_end
     transition.io.request.bits.cid := f3_imemresp.context.cid
     val end_bank = if (nBanks == 1) 0.U else f3_end_idx(log2Ceil(fetchWidth) - 1)
@@ -987,10 +988,25 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
       f3_fetch_bundle.edge_inst(end_bank)
     transition.io.request.bits.pc := f3_aligned_pc + (f3_end_idx << 1) + Mux(end_is_edge, 2.U, 4.U)
     transition.io.request.bits.is_end := true.B
+    transition.io.request.bits.confirmed := false.B
 
     transition.io.response.ready := f4.io.enq.ready && !f3_clear
-    f3_transition_ready := !io.cpu.stop_fetch && (!f3_has_end || transition.io.response.valid)
-    end_fire := transition.io.response.fire
+
+    when (confirmed) {
+      transition.io.request.valid := request.valid
+      transition.io.request.bits := request.bits
+      transition.io.response.ready := response.ready
+    }
+    request.ready := confirmed && transition.io.request.ready
+    response.valid := confirmed && transition.io.response.valid
+    response.bits := transition.io.response.bits
+    when (request.fire) {
+      assert(request.bits.confirmed && !request.bits.is_end,
+        "controller transition must record a confirmed miss")
+    }
+
+    f3_transition_ready := !confirmed && !io.cpu.stop_fetch && (!f3_has_end || transition.io.response.valid)
+    end_fire := !confirmed && transition.io.response.fire
     last_end_fire := end_fire && transition.io.response.bits.last_end
     io.cpu.last_end := last_end_fire
 
@@ -1006,7 +1022,7 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
     transition_idx.valid := f3_has_end
     transition_idx.bits := f3_end_idx
     f3_fetch_bundle.setSavedTail(buffer.io.tail, transition_idx)
-    f3_fetch_bundle.last_end.valid := f3_has_end && transition.io.response.bits.last_end
+    f3_fetch_bundle.last_end.valid := !confirmed && f3_has_end && transition.io.response.bits.last_end
     f3_fetch_bundle.last_end.bits := f3_end_idx
 
     when (f3_has_end) {

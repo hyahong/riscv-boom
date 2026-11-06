@@ -7,7 +7,7 @@ import org.chipsalliance.cde.config.Parameters
 import freechips.rocketchip.rocket.M_XRD
 
 import boom.v3.common._
-import boom.v3.ifu.CoroPCBufferEntry
+import boom.v3.ifu.{CoroTransitionRequest, CoroTransitionResponse}
 
 class CoroCommand(implicit p: Parameters) extends BoomBundle
 {
@@ -70,10 +70,12 @@ class CoroController(implicit p: Parameters) extends BoomModule
 
     // original load at the head-miss ROB flush
     val miss_flush = Input(Valid(new MicroOp))
-    // push the resume PC of outgoing context after rollback
-    val resume_pc = Decoupled(new CoroPCBufferEntry)
     // committed ordinary demand load
     val load_commit = Input(UInt(maxCoroContexts.W))
+
+    // record the confirmed resume PC and select the next CID after rollback
+    val transition_request = Decoupled(new CoroTransitionRequest)
+    val transition_response = Flipped(Decoupled(new CoroTransitionResponse))
 
     val committed = Input(new CoroRegisterStatus)
 
@@ -120,7 +122,7 @@ class CoroController(implicit p: Parameters) extends BoomModule
   // s_join_3   : redirect to the host
   // s_miss_1   : wait for rollback
   // s_miss_2   : push the resume PC of outgoing context, wait for journal space if full
-  // s_miss_3   : redirect the next context
+  // s_miss_3   : save dirty registers and redirect the next context
   val s_idle :: s_fork_1 :: s_fork_2 :: s_fork_3 :: s_running :: s_join_0 :: s_join_1 :: s_join_2 :: s_join_3 :: s_miss_1 :: s_miss_2 :: s_miss_3 :: Nil = Enum(12)
   val state = RegInit(s_idle)
 
@@ -147,6 +149,8 @@ class CoroController(implicit p: Parameters) extends BoomModule
   val boundary_buffer = Reg(new MicroOp)
   val miss_pc = Reg(UInt(vaddrBitsExtended.W))
   val miss_pc_valid = RegInit(false.B)
+  val next_cid = Reg(UInt(coroIdxBits.W))
+
   val miss_redirect = RegNext(io.miss_flush.valid, false.B)
   when (miss_redirect) {
     assert(io.redirect.valid, "head-miss flush requires the original load PC from the FTQ")
@@ -185,10 +189,12 @@ class CoroController(implicit p: Parameters) extends BoomModule
   io.context_redirect.bits.ftq_idx := boundary_buffer.ftq_idx
   io.context_redirect.bits.host_pc := host_pc.bits
 
-  io.resume_pc.valid := false.B
-  io.resume_pc.bits.cid := boundary_buffer.sdm.context.cid
-  io.resume_pc.bits.pc := miss_pc
-  io.resume_pc.bits.active := io.committed_active
+  io.transition_request.valid := false.B
+  io.transition_request.bits.cid := boundary_buffer.sdm.context.cid
+  io.transition_request.bits.pc := miss_pc
+  io.transition_request.bits.is_end := false.B
+  io.transition_request.bits.confirmed := true.B
+  io.transition_response.ready := false.B
 
   io.host_pc := host_pc
   io.entry_pc := entry_pc
@@ -357,15 +363,24 @@ class CoroController(implicit p: Parameters) extends BoomModule
     }
     is (s_miss_2) {
       io.stop_fetch := true.B
-      io.resume_pc.valid := !io.flush
+      io.transition_request.valid := !io.flush
+      io.transition_response.ready := !io.flush
 
-      when (io.resume_pc.fire) {
+      when (io.transition_response.fire) {
+        assert(io.transition_request.fire && io.transition_response.bits.recorded &&
+          !io.transition_response.bits.last_end, "confirmed miss requires an atomic journal record and response")
+
+        next_cid := Mux(io.transition_response.bits.next_cid.valid,
+          io.transition_response.bits.next_cid.bits, boundary_buffer.sdm.context.cid)
         state := s_miss_3
       }
     }
     is (s_miss_3) {
-      io.context_redirect.valid := !io.flush
+      io.boundary.valid := true.B
+
+      io.context_redirect.valid := !io.committed.dirty.orR && io.rob_idle && !io.flush
       io.context_redirect.bits.context := boundary_buffer.sdm.context
+      io.context_redirect.bits.context.cid := next_cid
       io.stop_fetch := !io.context_redirect.fire
 
       when (io.context_redirect.fire) {

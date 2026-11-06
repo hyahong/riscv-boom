@@ -53,6 +53,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
 
     val req          = Input(new BoomDCacheReqInternal)
     val req_is_probe = Input(Bool())
+    val keep_refill  = Input(Bool())
 
     val idx = Output(Valid(UInt()))
     val way = Output(Valid(UInt()))
@@ -141,9 +142,6 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
 
   val grantack = Reg(Valid(new TLBundleE(edge.bundle)))
   val refill_ctr  = Reg(UInt(log2Ceil(cacheDataBeats).W))
-  val keep_refill = enableSDM.B && !io.req.is_hella &&
-    io.req.uop.uses_ldq && io.req.uop.mem_cmd === M_XRD &&
-    io.req.uop.sdm.context.is_coro && !io.req.uop.is_internal
   val commit_line = Reg(Bool())
   val grant_had_data = Reg(Bool())
   val finish_to_prefetch = Reg(Bool())
@@ -188,9 +186,6 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
   io.mem_grant.ready     := false.B
 
   when (io.req_sec_val && io.req_sec_rdy) {
-    when (keep_refill) {
-      commit_line := true.B
-    }
     req.uop.mem_cmd := dirtier_cmd
     when (is_hit_again) {
       new_coh := dirtier_coh
@@ -201,7 +196,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
     val new_state = WireInit(old_state)
     grantack.valid := false.B
     refill_ctr := 0.U
-    commit_line := keep_refill
+    commit_line := false.B
     assert(rpq.io.enq.ready)
     req := io.req
     val old_coh   = io.req.old_meta.coh
@@ -410,6 +405,10 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
       next_state := handle_pri_req(state)
     }
   }
+  // install the data even uop is squashed if keep_refill is true
+  when (enableSDM.B && io.keep_refill) {
+    commit_line := true.B
+  }
 }
 
 class BoomIOMSHR(id: Int)(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
@@ -533,6 +532,7 @@ class BoomMSHRFile(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()
     val secondary_miss = Output(Vec(memWidth, Bool()))
     val block_hit = Output(Vec(memWidth, Bool()))
     val miss_ack = Output(Vec(memWidth, Valid(new MicroOp)))
+    val keep_refill = Input(Valid(UInt(corePAddrBits.W)))
 
     val brupdate       = Input(new BrUpdateInfo)
     val exception    = Input(Bool())
@@ -663,6 +663,9 @@ class BoomMSHRFile(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()
     mshr.io.req_sec_val  := req.valid && sdq_rdy && tag_match(req_idx) && idx_matches(req_idx)(i) && cacheable
     mshr.io.req          := req.bits
     mshr.io.req_is_probe := req_is_probe
+    mshr.io.keep_refill := enableSDM.B && io.keep_refill.valid && mshr.io.way.valid &&
+      mshr.io.idx.bits === io.keep_refill.bits(untagBits-1, blockOffBits) &&
+      mshr.io.tag.bits === (io.keep_refill.bits >> untagBits)
     mshr.io.req.sdq_id   := sdq_alloc_id
 
     // Clear because of a FENCE, a request to the same idx as a prefetched line,

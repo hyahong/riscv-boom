@@ -380,7 +380,9 @@ trait ExcCauseConstants
   // a memory disambigious misspeculation occurred
   val MINI_EXCEPTION_MEM_ORDERING = 16.U
   val MINI_EXCEPTION_CSR_REPLAY = 17.U
+  val MINI_EXCEPTION_SDM_MISS = 18.U
 
   require (!freechips.rocketchip.rocket.Causes.all.contains(16))
   require (!freechips.rocketchip.rocket.Causes.all.contains(17))
+  require (!freechips.rocketchip.rocket.Causes.all.contains(18))
 }

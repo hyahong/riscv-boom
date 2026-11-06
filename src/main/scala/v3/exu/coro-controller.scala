@@ -63,6 +63,10 @@ class CoroController(implicit p: Parameters) extends BoomModule
 
     val miss_candidate = Input(Valid(new MicroOp))
     val miss_eligible = Output(Bool())
+
+    // request SDM mini-exception
+    val exception_request = Output(Bool())
+
     // outgoing CID when head-miss flush occurs
     val resume_protect = Input(Valid(UInt(coroIdxBits.W)))
     // committed ordinary demand load
@@ -129,6 +133,9 @@ class CoroController(implicit p: Parameters) extends BoomModule
   val resume_protected = (resume_pending & candidate_mask).orR
   io.miss_eligible := enableSDM.B && io.miss_candidate.valid && other_active.orR &&
     state === s_running && !io.last_end && !io.flush && !io.rob_flush && !recovering && !resume_protected
+
+  // forwad the port for after uses
+  io.exception_request := io.miss_eligible
 
   // internal uops use the boundary uop's (run or ...) properties
   val boundary_buffer = Reg(new MicroOp)

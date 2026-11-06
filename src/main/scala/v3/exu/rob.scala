@@ -561,7 +561,8 @@ class Rob(
   // Note: exception must be in the commit bundle.
   // Note: exception must be the first valid instruction in the commit bundle.
   exception_thrown := will_throw_exception
-  val is_mini_exception = io.com_xcpt.bits.cause.isOneOf(MINI_EXCEPTION_MEM_ORDERING, MINI_EXCEPTION_CSR_REPLAY)
+  val is_mini_exception = io.com_xcpt.bits.cause.isOneOf(
+    MINI_EXCEPTION_MEM_ORDERING, MINI_EXCEPTION_CSR_REPLAY, MINI_EXCEPTION_SDM_MISS)
   io.com_xcpt.valid := exception_thrown && !is_mini_exception
   io.com_xcpt.bits := DontCare
   io.com_xcpt.bits.cause := r_xcpt_uop.exc_cause
@@ -603,6 +604,8 @@ class Rob(
   io.flush.valid          := flush_val
   io.flush.bits           := DontCare
   io.flush.bits.context   := flush_uop.sdm.context
+  io.flush.bits.cause     := Mux(exception_thrown, r_xcpt_uop.exc_cause, 0.U)
+  io.flush.bits.badvaddr  := r_xcpt_badvaddr
   io.flush.bits.ftq_idx   := flush_uop.ftq_idx
   io.flush.bits.pc_lob    := flush_uop.pc_lob
   io.flush.bits.edge_inst := flush_uop.edge_inst

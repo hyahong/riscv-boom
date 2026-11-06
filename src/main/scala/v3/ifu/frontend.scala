@@ -306,6 +306,7 @@ class BoomFrontendIO(implicit p: Parameters) extends BoomBundle
 
   val context_init = Output(Valid(new CoroPCBufferInit))
   val context_redirect = Decoupled(new CoroContextRedirect)
+  val context_resume = Decoupled(new CoroPCBufferEntry)
   val context_commit_tail = Output(Valid(UInt(coroPCBufferPtrBits.W)))
   val context_committed_active = Input(UInt(maxCoroContexts.W))
   val context_flush = Output(Bool())
@@ -380,12 +381,26 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
   // in ROB flush, make the FTQ use this history
   target_ghist.current_saw_branch_not_taken := true.B
   io.cpu.context_redirect.ready := false.B
+  io.cpu.context_resume.ready := false.B
   io.cpu.last_end := false.B
   io.cpu.context_committed_active := 0.U
   coro_pc_buffer.foreach { buffer =>
     buffer.io.init := io.cpu.context_init
-    buffer.io.push <> coro_transition.get.io.entry
+    val entry = coro_transition.get.io.entry
+    val resume = io.cpu.context_resume
+    val resume_allowed = !io.cpu.context_kill && !io.cpu.redirect_flush &&
+      !io.cpu.redirect_val && !io.cpu.sfence.valid
+    buffer.io.push.valid := Mux(resume.valid, resume_allowed, entry.valid)
+    buffer.io.push.bits := Mux(resume.valid, resume.bits, entry.bits)
+    entry.ready := buffer.io.push.ready && !resume.valid
+    resume.ready := buffer.io.push.ready && resume_allowed
     buffer.io.commit_tail := io.cpu.context_commit_tail
+    when (resume.fire) {
+      assert(!io.cpu.context_commit_tail.valid, "resume record requires completed ROB recovery")
+
+      buffer.io.commit_tail.valid := true.B
+      buffer.io.commit_tail.bits := buffer.io.tail + 1.U
+    }
     buffer.io.rollback_tail.valid := io.cpu.brupdate.b2.mispredict &&
       !RegNext(io.cpu.context_flush, false.B) && io.cpu.brupdate.b2.uop.sdm.saved_tail.valid
     buffer.io.rollback_tail.bits := io.cpu.brupdate.b2.uop.sdm.saved_tail.bits
@@ -964,7 +979,7 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
     transition.io.active := buffer.io.active
     transition.io.kill := io.cpu.context_init.valid || io.cpu.context_flush || io.cpu.context_kill ||
       io.cpu.redirect_flush || io.cpu.redirect_val || io.cpu.sfence.valid || context_redirect_fire ||
-      io.cpu.stop_fetch
+      io.cpu.stop_fetch || io.cpu.context_resume.valid
     transition.io.request.valid := f3.io.deq.valid && f3_has_end
     transition.io.request.bits.cid := f3_imemresp.context.cid
     val end_bank = if (nBanks == 1) 0.U else f3_end_idx(log2Ceil(fetchWidth) - 1)

@@ -43,8 +43,16 @@ class CoroController(implicit p: Parameters) extends BoomModule
 
     val pipeline_empty = Input(Bool())
 
+    val rob_idle = Input(Bool())
+    val rob_flush = Input(Bool())
+
     val flush = Input(Bool())
     val redirect = Input(Valid(UInt(vaddrBitsExtended.W)))
+
+    val committed_active = Input(UInt(maxCoroContexts.W))
+
+    val miss_candidate = Input(Valid(new MicroOp))
+    val miss_eligible = Output(Bool())
 
     val committed = Input(new CoroRegisterStatus)
 
@@ -91,6 +99,17 @@ class CoroController(implicit p: Parameters) extends BoomModule
   // s_join_3   : redirect to the host
   val s_idle :: s_fork_1 :: s_fork_2 :: s_fork_3 :: s_running :: s_join_0 :: s_join_1 :: s_join_2 :: s_join_3 :: Nil = Enum(9)
   val state = RegInit(s_idle)
+
+  val recovering = RegInit(false.B)
+  when (io.rob_flush) {
+    recovering := true.B
+  } .elsewhen (io.rob_idle && !io.flush) {
+    recovering := false.B
+  }
+  val other_active = io.committed_active &
+    ~UIntToOH(io.miss_candidate.bits.sdm.context.cid, maxCoroContexts)
+  io.miss_eligible := enableSDM.B && io.miss_candidate.valid && other_active.orR &&
+    state === s_running && !io.last_end && !io.flush && !io.rob_flush && !recovering
 
   // internal uops use the boundary uop's (run or ...) properties
   val boundary_buffer = Reg(new MicroOp)

@@ -4,6 +4,7 @@ import chisel3._
 import chisel3.util._
 
 import org.chipsalliance.cde.config.Parameters
+import freechips.rocketchip.rocket.M_XRD
 
 import boom.v3.common._
 
@@ -27,6 +28,15 @@ object CoroController
   def isCommand(uop: MicroOp): Bool = {
     uop.uopc === uopSDM.SET_FUNC || uop.uopc === uopSDM.SET_FRAME ||
       uop.uopc === uopSDM.SET_COUNT || uop.uopc === uopSDM.RUN
+  }
+
+  def loadCommitMask(commit: CommitSignals): UInt = {
+    (commit.valids zip commit.uops).map { case (valid, uop) =>
+      val demand = valid && uop.sdm.context.is_coro && !uop.is_internal &&
+        uop.uses_ldq && uop.mem_cmd === M_XRD
+      Mux(demand, UIntToOH(uop.sdm.context.cid, uop.maxCoroContexts),
+        0.U(uop.maxCoroContexts.W))
+    }.reduce(_ | _)
   }
 }
 
@@ -53,6 +63,10 @@ class CoroController(implicit p: Parameters) extends BoomModule
 
     val miss_candidate = Input(Valid(new MicroOp))
     val miss_eligible = Output(Bool())
+    // outgoing CID when head-miss flush occurs
+    val resume_protect = Input(Valid(UInt(coroIdxBits.W)))
+    // committed ordinary demand load
+    val load_commit = Input(UInt(maxCoroContexts.W))
 
     val committed = Input(new CoroRegisterStatus)
 
@@ -106,16 +120,32 @@ class CoroController(implicit p: Parameters) extends BoomModule
   } .elsewhen (io.rob_idle && !io.flush) {
     recovering := false.B
   }
-  val other_active = io.committed_active &
-    ~UIntToOH(io.miss_candidate.bits.sdm.context.cid, maxCoroContexts)
+
+  // after a head-miss flush, this CID's load to commit is the resumed load
+  // so protect the context not to switch
+  val resume_pending = RegInit(0.U(maxCoroContexts.W))
+  val candidate_mask = UIntToOH(io.miss_candidate.bits.sdm.context.cid, maxCoroContexts)
+  val other_active = io.committed_active & ~candidate_mask
+  val resume_protected = (resume_pending & candidate_mask).orR
   io.miss_eligible := enableSDM.B && io.miss_candidate.valid && other_active.orR &&
-    state === s_running && !io.last_end && !io.flush && !io.rob_flush && !recovering
+    state === s_running && !io.last_end && !io.flush && !io.rob_flush && !recovering && !resume_protected
 
   // internal uops use the boundary uop's (run or ...) properties
   val boundary_buffer = Reg(new MicroOp)
 
   val run_commit = io.commit.valid && io.commit.bits.uopc === uopSDM.RUN
   val run_redirect = RegNext(run_commit, false.B)
+
+  val new_resume = Mux(io.resume_protect.valid,
+    UIntToOH(io.resume_protect.bits, maxCoroContexts), 0.U(maxCoroContexts.W))
+  when (run_commit) {
+    resume_pending := 0.U
+  } .otherwise {
+    resume_pending := (resume_pending & ~io.load_commit) | new_resume
+  }
+  when (io.resume_protect.valid) {
+    assert(io.rob_flush, "resume protection requires a head-miss ROB flush")
+  }
 
   // valid/dirty bitmap
   io.init := 0.U.asTypeOf(io.init)

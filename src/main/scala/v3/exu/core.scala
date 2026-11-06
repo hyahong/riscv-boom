@@ -1105,6 +1105,8 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
     controller.io.rob_idle := rob.io.empty && rob.io.ready
     controller.io.rob_flush := rob.io.flush.valid
     controller.io.miss_candidate := io.lsu.miss_candidate
+    controller.io.load_commit := CoroController.loadCommitMask(rob.io.commit)
+    controller.io.resume_protect := 0.U.asTypeOf(controller.io.resume_protect)
     controller.io.committed_active := io.ifu.context_committed_active
     controller.io.redirect.valid := io.ifu.redirect_val && io.ifu.redirect_flush
     controller.io.redirect.bits := io.ifu.redirect_pc

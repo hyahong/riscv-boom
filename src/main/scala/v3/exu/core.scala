@@ -1102,6 +1102,10 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
     controller.io.end_commit.bits := Mux1H(ends, rob.io.commit.uops)
     controller.io.last_end := io.ifu.last_end
     controller.io.flush := ren1_kill
+    controller.io.rob_idle := rob.io.empty && rob.io.ready
+    controller.io.rob_flush := rob.io.flush.valid
+    controller.io.miss_candidate := io.lsu.miss_candidate
+    controller.io.committed_active := io.ifu.context_committed_active
     controller.io.redirect.valid := io.ifu.redirect_val && io.ifu.redirect_flush
     controller.io.redirect.bits := io.ifu.redirect_pc
     controller.io.pipeline_empty := rob.io.empty && rob.io.ready && io.lsu.fencei_rdy

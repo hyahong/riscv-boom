@@ -307,6 +307,7 @@ class BoomFrontendIO(implicit p: Parameters) extends BoomBundle
   val context_init = Output(Valid(new CoroPCBufferInit))
   val context_redirect = Decoupled(new CoroContextRedirect)
   val context_commit_tail = Output(Valid(UInt(coroPCBufferPtrBits.W)))
+  val context_committed_active = Input(UInt(maxCoroContexts.W))
   val context_flush = Output(Bool())
   val context_kill = Output(Bool())
 
@@ -380,6 +381,7 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
   target_ghist.current_saw_branch_not_taken := true.B
   io.cpu.context_redirect.ready := false.B
   io.cpu.last_end := false.B
+  io.cpu.context_committed_active := 0.U
   coro_pc_buffer.foreach { buffer =>
     buffer.io.init := io.cpu.context_init
     buffer.io.push <> coro_transition.get.io.entry
@@ -389,6 +391,7 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
     buffer.io.rollback_tail.bits := io.cpu.brupdate.b2.uop.sdm.saved_tail.bits
     buffer.io.flush := io.cpu.context_flush
     buffer.io.target_cid := io.cpu.context_redirect.bits.context.cid
+    io.cpu.context_committed_active := buffer.io.committed_active
 
     target_context := io.cpu.context_redirect.bits.context
     target_pc := Mux(target_context.is_coro, buffer.io.pc, io.cpu.context_redirect.bits.host_pc)

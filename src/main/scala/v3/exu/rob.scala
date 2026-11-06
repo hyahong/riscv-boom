@@ -91,6 +91,9 @@ class RobIo(
   // (some loads can only execute once they are at the head of the ROB).
   val com_load_is_at_rob_head = Output(Bool())
 
+  // when the head instruction is a load
+  val head_load = Output(Valid(UInt(robAddrSz.W)))
+
   // Communicate exceptions to the CSRFile
   val com_xcpt = Valid(new CommitExceptionSignals())
 
@@ -569,6 +572,14 @@ class Rob(
 
   val refetch_inst = exception_thrown || insn_sys_pc2epc
   val com_xcpt_uop = PriorityMux(rob_head_vals, io.commit.uops)
+  io.head_load := 0.U.asTypeOf(io.head_load)
+  if (enableSDM) {
+    // head_load is valid if head uop is load and ...
+    io.head_load.valid := rob_head_vals.asUInt.orR && com_xcpt_uop.uses_ldq &&
+      (rob_state === s_normal || rob_state === s_wait_till_empty) &&
+      !PriorityMux(rob_head_vals, can_throw_exception) && !exception_thrown && !io.flush.valid
+    io.head_load.bits := com_xcpt_uop.rob_idx
+  }
   io.com_xcpt.bits.context   := com_xcpt_uop.sdm.context
   io.com_xcpt.bits.ftq_idx   := com_xcpt_uop.ftq_idx
   io.com_xcpt.bits.edge_inst := com_xcpt_uop.edge_inst

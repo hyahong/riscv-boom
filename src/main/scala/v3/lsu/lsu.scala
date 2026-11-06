@@ -125,6 +125,7 @@ class LSUCoreIO(implicit p: Parameters) extends BoomBundle()(p)
 
   val commit      = Input(new CommitSignals)
   val commit_load_at_rob_head = Input(Bool())
+  val rob_head_load = Input(Valid(UInt(robAddrSz.W)))
 
   // Stores clear busy bit when stdata is received
   // memWidth for int, 1 for fp (to avoid back-pressure fpstdat)

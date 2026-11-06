@@ -125,7 +125,10 @@ class LSUCoreIO(implicit p: Parameters) extends BoomBundle()(p)
 
   val commit      = Input(new CommitSignals)
   val commit_load_at_rob_head = Input(Bool())
+
   val rob_head_load = Input(Valid(UInt(robAddrSz.W)))
+
+  val miss_candidate = Output(Valid(new MicroOp))
 
   // Stores clear busy bit when stdata is received
   // memWidth for int, 1 for fp (to avoid back-pressure fpstdat)
@@ -1478,6 +1481,24 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
         ldq(f_idx).bits.debug_wb_data   := loadgen.data
       }
     }
+  }
+
+  io.core.miss_candidate := 0.U.asTypeOf(io.core.miss_candidate)
+  if (enableSDM) {
+    val entry = ldq(ldq_head)
+    val uop = entry.bits.uop
+    val completing = io.core.exe.map { e =>
+      (e.iresp.valid && e.iresp.bits.uop.uses_ldq && e.iresp.bits.uop.ldq_idx === ldq_head) ||
+      (e.fresp.valid && e.fresp.bits.uop.uses_ldq && e.fresp.bits.uop.ldq_idx === ldq_head)
+    }.reduce(_||_)
+    io.core.miss_candidate.valid := io.core.rob_head_load.valid && entry.valid &&
+      uop.rob_idx === io.core.rob_head_load.bits &&
+      uop.uses_ldq && uop.mem_cmd === rocket.M_XRD && uop.sdm.context.is_coro && !uop.is_internal &&
+      entry.bits.addr.valid && !entry.bits.addr_is_virtual && !entry.bits.addr_is_uncacheable &&
+      entry.bits.executed && entry.bits.miss_pending && !entry.bits.succeeded &&
+      !uop.exception && !entry.bits.order_fail && !failed_loads(ldq_head) && !nacking_loads(ldq_head) &&
+      !completing && !io.core.exception && !io.core.commit.rollback && !IsKilledByBranch(io.core.brupdate, uop)
+    io.core.miss_candidate.bits := UpdateBrMask(io.core.brupdate, uop)
   }
 
   // Initially assume the speculative load wakeup failed

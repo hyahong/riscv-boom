@@ -39,7 +39,9 @@ class CoroPCBuffer(implicit p: Parameters) extends BoomModule
     val target_cid = Input(UInt(coroIdxBits.W))
 
     val pc         = Output(UInt(vaddrBitsExtended.W))
-    val active     = Output(UInt(maxCoroContexts.W))
+
+    val active           = Output(UInt(maxCoroContexts.W))
+    val committed_active = Output(UInt(maxCoroContexts.W))
 
     val tail       = Output(UInt(coroPCBufferPtrBits.W))
 
@@ -147,4 +149,7 @@ class CoroPCBuffer(implicit p: Parameters) extends BoomModule
   // always uses latest active bitmap
   val latest_idx = entryIndex(tail - 1.U)
   io.active := Mux(empty, base_active, entries(latest_idx).active)
+
+  val committed_idx = entryIndex(forward_head - 1.U)
+  io.committed_active := Mux(pending, entries(committed_idx).active, base_active)
 }

@@ -103,6 +103,7 @@ class RobIo(
   // Flush signals (including exceptions, pipeline replays, and memory ordering failures)
   // to send to the frontend for redirection.
   val flush = Valid(new CommitExceptionSignals)
+  val flush_uop = Output(new MicroOp)
 
   // Stall Decode as appropriate
   val empty = Output(Bool())
@@ -599,6 +600,7 @@ class Rob(
     "[rob] Can't commit multiple flush_on_commit instructions on one cycle")
 
   val flush_uop = Mux(exception_thrown, com_xcpt_uop, Mux1H(flush_commit_mask, io.commit.uops))
+  io.flush_uop := flush_uop
 
   // delay a cycle for critical path considerations
   io.flush.valid          := flush_val

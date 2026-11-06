@@ -1110,8 +1110,8 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
     controller.io.load_commit := CoroController.loadCommitMask(rob.io.commit)
     io.lsu.exception_request := controller.io.exception_request && !rob.io.csr_replay.valid
     val miss_flush = rob.io.flush.valid && rob.io.flush.bits.cause === MINI_EXCEPTION_SDM_MISS
-    controller.io.resume_protect.valid := miss_flush
-    controller.io.resume_protect.bits := rob.io.flush.bits.context.cid
+    controller.io.miss_flush.valid := miss_flush
+    controller.io.miss_flush.bits := rob.io.flush_uop
     io.lsu.keep_refill.valid := miss_flush
     io.lsu.keep_refill.bits := rob.io.flush.bits.badvaddr
     controller.io.committed_active := io.ifu.context_committed_active

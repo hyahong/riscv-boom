@@ -177,6 +177,8 @@ class LDQEntry(implicit p: Parameters) extends BoomBundle()(p)
 
   val executed            = Bool() // load sent to memory, reset by NACKs
   val succeeded           = Bool()
+
+  val miss_pending        = Bool() // MSHR accepts this load (data has not completed yet)
   val order_fail          = Bool()
   val observed            = Bool()
 
@@ -313,6 +315,7 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       ldq(ld_enq_idx).bits.addr.valid      := false.B
       ldq(ld_enq_idx).bits.executed        := false.B
       ldq(ld_enq_idx).bits.succeeded       := false.B
+      ldq(ld_enq_idx).bits.miss_pending    := false.B
       ldq(ld_enq_idx).bits.order_fail      := false.B
       ldq(ld_enq_idx).bits.observed        := false.B
       ldq(ld_enq_idx).bits.forward_std_val := false.B
@@ -1356,6 +1359,23 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
 
   val dmem_resp_fired = WireInit(widthMap(w => false.B))
 
+  // MSHR request is accepted in S2 stage
+  // it means that the load instruction occurs cache miss (L1)
+  if (enableSDM) {
+    for (w <- 0 until memWidth) {
+      val ack = io.dmem.miss_ack(w)
+      val uop = ack.bits
+      val entry = ldq(uop.ldq_idx)
+      val same_load = entry.valid && entry.bits.uop.rob_idx === uop.rob_idx &&
+        entry.bits.uop.pdst === uop.pdst
+      when (ack.valid && uop.uses_ldq && uop.mem_cmd === rocket.M_XRD &&
+        same_load && entry.bits.executed && !entry.bits.succeeded &&
+        !io.core.exception && !IsKilledByBranch(io.core.brupdate, uop)) {
+        ldq(uop.ldq_idx).bits.miss_pending := true.B
+      }
+    }
+  }
+
   for (w <- 0 until memWidth) {
     // Handle nacks
     when (io.dmem.nack(w).valid)
@@ -1403,6 +1423,7 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
         dmem_resp_fired(w) := true.B
 
         ldq(ldq_idx).bits.succeeded      := io.core.exe(w).iresp.valid || io.core.exe(w).fresp.valid
+        ldq(ldq_idx).bits.miss_pending   := false.B
         ldq(ldq_idx).bits.debug_wb_data  := io.dmem.resp(w).bits.data
       }
         .elsewhen (io.dmem.resp(w).bits.uop.uses_stq)
@@ -1449,6 +1470,7 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
 
       when (data_ready && live) {
         ldq(f_idx).bits.succeeded := data_ready
+        ldq(f_idx).bits.miss_pending := false.B
         ldq(f_idx).bits.forward_std_val := true.B
         ldq(f_idx).bits.forward_stq_idx := wb_forward_stq_idx(w)
 
@@ -1506,8 +1528,9 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       ldq(i).bits.uop.br_mask := GetNewBrMask(io.core.brupdate, ldq(i).bits.uop.br_mask)
       when (IsKilledByBranch(io.core.brupdate, ldq(i).bits.uop))
       {
-        ldq(i).valid           := false.B
-        ldq(i).bits.addr.valid := false.B
+        ldq(i).valid             := false.B
+        ldq(i).bits.addr.valid   := false.B
+        ldq(i).bits.miss_pending := false.B
       }
     }
   }
@@ -1544,6 +1567,7 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       ldq(idx).bits.addr.valid       := false.B
       ldq(idx).bits.executed         := false.B
       ldq(idx).bits.succeeded        := false.B
+      ldq(idx).bits.miss_pending     := false.B
       ldq(idx).bits.order_fail       := false.B
       ldq(idx).bits.forward_std_val  := false.B
 
@@ -1713,9 +1737,10 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
 
     for (i <- 0 until numLdqEntries)
     {
-      ldq(i).valid           := false.B
-      ldq(i).bits.addr.valid := false.B
-      ldq(i).bits.executed   := false.B
+      ldq(i).valid             := false.B
+      ldq(i).bits.addr.valid   := false.B
+      ldq(i).bits.executed     := false.B
+      ldq(i).bits.miss_pending := false.B
     }
   }
 

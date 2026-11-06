@@ -431,6 +431,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   val wb = Module(new BoomWritebackUnit)
   val prober = Module(new BoomProbeUnit)
   val mshrs = Module(new BoomMSHRFile)
+  mshrs.io.keep_refill  := io.lsu.keep_refill
   mshrs.io.clear_all    := io.lsu.force_order
   mshrs.io.brupdate     := io.lsu.brupdate
   mshrs.io.exception    := io.lsu.exception

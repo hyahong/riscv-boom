@@ -89,6 +89,8 @@ class LSUDMemIO(implicit p: Parameters, edge: TLEdgeOut) extends BoomBundle()(p)
   val nack        = Flipped(Vec(memWidth, new ValidIO(new BoomDCacheReq)))
   // cacheable load accepted by MSHR in DCache S2 (allocation or merge)
   val miss_ack    = Flipped(Vec(memWidth, Valid(new MicroOp)))
+  // line selected by a confirmed SDM head-miss flush
+  val keep_refill = Output(Valid(UInt(corePAddrBits.W)))
 
   val brupdate     = Output(new BrUpdateInfo)
   val exception    = Output(Bool())
@@ -129,6 +131,8 @@ class LSUCoreIO(implicit p: Parameters) extends BoomBundle()(p)
   val rob_head_load = Input(Valid(UInt(robAddrSz.W)))
 
   val miss_candidate = Output(Valid(new MicroOp))
+  val exception_request = Input(Bool())
+  val keep_refill = Input(Valid(UInt(corePAddrBits.W)))
 
   // Stores clear busy bit when stdata is received
   // memWidth for int, 1 for fp (to avoid back-pressure fpstdat)
@@ -1333,7 +1337,8 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
   r_xcpt.cause       := Mux(use_mem_xcpt, mem_xcpt_cause, MINI_EXCEPTION_MEM_ORDERING)
   r_xcpt.badvaddr    := mem_xcpt_vaddr // TODO is there another register we can use instead?
 
-  io.core.lxcpt.valid := r_xcpt_valid && !io.core.exception && !IsKilledByBranch(io.core.brupdate, r_xcpt.uop)
+  val lxcpt_valid = r_xcpt_valid && !io.core.exception && !IsKilledByBranch(io.core.brupdate, r_xcpt.uop)
+  io.core.lxcpt.valid := lxcpt_valid
   io.core.lxcpt.bits  := r_xcpt
 
   // Task 4: Speculatively wakeup loads 1 cycle before they come back
@@ -1484,7 +1489,9 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
   }
 
   io.core.miss_candidate := 0.U.asTypeOf(io.core.miss_candidate)
+  io.dmem.keep_refill := 0.U.asTypeOf(io.dmem.keep_refill)
   if (enableSDM) {
+    io.dmem.keep_refill := io.core.keep_refill
     val entry = ldq(ldq_head)
     val uop = entry.bits.uop
     val completing = io.core.exe.map { e =>
@@ -1499,6 +1506,13 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       !uop.exception && !entry.bits.order_fail && !failed_loads(ldq_head) && !nacking_loads(ldq_head) &&
       !completing && !io.core.exception && !io.core.commit.rollback && !IsKilledByBranch(io.core.brupdate, uop)
     io.core.miss_candidate.bits := UpdateBrMask(io.core.brupdate, uop)
+
+    when (io.core.exception_request && io.core.miss_candidate.valid && !lxcpt_valid) {
+      io.core.lxcpt.valid := true.B
+      io.core.lxcpt.bits.uop := io.core.miss_candidate.bits
+      io.core.lxcpt.bits.cause := MINI_EXCEPTION_SDM_MISS
+      io.core.lxcpt.bits.badvaddr := entry.bits.addr.bits
+    }
   }
 
   // Initially assume the speculative load wakeup failed

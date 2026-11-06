@@ -393,6 +393,8 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
   io.ifu.context_commit_tail    := 0.U.asTypeOf(io.ifu.context_commit_tail)
   io.ifu.context_flush          := enableSDM.B && rob.io.flush.valid
   io.ifu.stop_fetch             := false.B
+  io.lsu.exception_request      := false.B
+  io.lsu.keep_refill            := 0.U.asTypeOf(io.lsu.keep_refill)
 
   if (enableSDM) {
     for (w <- 0 until coreWidth) {
@@ -1106,7 +1108,12 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
     controller.io.rob_flush := rob.io.flush.valid
     controller.io.miss_candidate := io.lsu.miss_candidate
     controller.io.load_commit := CoroController.loadCommitMask(rob.io.commit)
-    controller.io.resume_protect := 0.U.asTypeOf(controller.io.resume_protect)
+    io.lsu.exception_request := controller.io.exception_request && !rob.io.csr_replay.valid
+    val miss_flush = rob.io.flush.valid && rob.io.flush.bits.cause === MINI_EXCEPTION_SDM_MISS
+    controller.io.resume_protect.valid := miss_flush
+    controller.io.resume_protect.bits := rob.io.flush.bits.context.cid
+    io.lsu.keep_refill.valid := miss_flush
+    io.lsu.keep_refill.bits := rob.io.flush.bits.badvaddr
     controller.io.committed_active := io.ifu.context_committed_active
     controller.io.redirect.valid := io.ifu.redirect_val && io.ifu.redirect_flush
     controller.io.redirect.bits := io.ifu.redirect_pc

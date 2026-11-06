@@ -141,6 +141,9 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
 
   val grantack = Reg(Valid(new TLBundleE(edge.bundle)))
   val refill_ctr  = Reg(UInt(log2Ceil(cacheDataBeats).W))
+  val keep_refill = enableSDM.B && !io.req.is_hella &&
+    io.req.uop.uses_ldq && io.req.uop.mem_cmd === M_XRD &&
+    io.req.uop.sdm.context.is_coro && !io.req.uop.is_internal
   val commit_line = Reg(Bool())
   val grant_had_data = Reg(Bool())
   val finish_to_prefetch = Reg(Bool())
@@ -185,6 +188,9 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
   io.mem_grant.ready     := false.B
 
   when (io.req_sec_val && io.req_sec_rdy) {
+    when (keep_refill) {
+      commit_line := true.B
+    }
     req.uop.mem_cmd := dirtier_cmd
     when (is_hit_again) {
       new_coh := dirtier_coh
@@ -195,6 +201,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
     val new_state = WireInit(old_state)
     grantack.valid := false.B
     refill_ctr := 0.U
+    commit_line := keep_refill
     assert(rpq.io.enq.ready)
     req := io.req
     val old_coh   = io.req.old_meta.coh
@@ -253,9 +260,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
       grantack.bits := edge.GrantAck(io.mem_grant.bits)
       next_state := Mux(grant_had_data, s_drain_rpq_loads, s_drain_rpq)
       assert(!(!grant_had_data && req_needs_wb))
-      commit_line := false.B
       new_coh := coh_on_grant
-
     }
   } .elsewhen (state === s_drain_rpq_loads) {
     val drain_load = (isRead(rpq.io.deq.bits.uop.mem_cmd) &&

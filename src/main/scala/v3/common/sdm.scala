@@ -47,6 +47,7 @@ class SDMMicroOpMetadata(implicit p: Parameters) extends BoomBundle
   val saved_tail      = Valid(UInt(coroPCBufferPtrBits.W))
   val last_end        = Bool()
   val load_prediction = Valid(Bool()) // true: predicted L1 miss, false: predicted hit
+  val prefetch        = Bool() // accepted prediction switch. convert this load before rename
 }
 
 object SDMFrame

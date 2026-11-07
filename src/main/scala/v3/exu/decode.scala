@@ -638,6 +638,26 @@ class DecodeUnit(implicit p: Parameters) extends BoomModule
   val di24_20 = Mux(cs.imm_sel === IS_B || cs.imm_sel === IS_S, inst(11,7), inst(24,20))
   uop.imm_packed := Cat(inst(31,25), di24_20, inst(19,12))
 
+  // only accepted frontend transition converts the load
+  uop.sdm.prefetch := false.B
+  if (enableSDM) {
+    when (io.enq.uop.sdm.prefetch && io.enq.uop.sdm.context.is_coro &&
+      !io.enq.uop.is_internal && !io.enq.uop.is_sfb && !xcpt_valid &&
+      cs.legal && cs.uopc === uopLD && cs.mem_cmd === M_XRD && cs.dst_type === RT_FIX) {
+      uop.uopc := uopPREFETCH
+      uop.is_internal := true.B
+      uop.sdm.prefetch := true.B
+      uop.ldst := 0.U
+      uop.ldst_val := false.B
+      uop.dst_rtype := RT_X
+      uop.uses_ldq := false.B
+      uop.uses_stq := false.B
+      uop.mem_cmd := M_PFR
+      uop.mem_size := 0.U
+      uop.mem_signed := false.B
+    }
+  }
+
   //-------------------------------------------------------------
 
   uop.is_br          := cs.is_br

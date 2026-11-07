@@ -153,6 +153,8 @@ class MicroOp(implicit p: Parameters) extends BoomBundle
   // Does this register write-back
   def rf_wen           = dst_rtype =/= RT_X
 
+  def is_sdm_prefetch  = is_internal && sdm.prefetch && uopc === uopPREFETCH
+
   // Is it possible for this uop to misspeculate, preventing the commit of subsequent uops?
   def unsafe           = uses_ldq || (uses_stq && !is_fence) || is_br || is_jalr
 

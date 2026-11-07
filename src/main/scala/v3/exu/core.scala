@@ -402,7 +402,9 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
   if (enableSDM) {
     for (w <- 0 until coreWidth) {
       val uop = rob.io.commit.uops(w)
-      when (rob.io.commit.valids(w) && !uop.is_internal && uop.sdm.context.is_coro && uop.sdm.saved_tail.valid) {
+      // converted prefetch commit a transition, but do not retire architectural instruction
+      when (rob.io.commit.valids(w) && (!uop.is_internal || uop.is_sdm_prefetch) &&
+        uop.sdm.context.is_coro && uop.sdm.saved_tail.valid) {
         io.ifu.context_commit_tail := uop.sdm.saved_tail
       }
     }

@@ -104,6 +104,7 @@ class FetchBuffer(implicit p: Parameters) extends BoomModule
         in_uops(i).sdm.saved_tail      := io.enq.bits.saved_tail(i)
         in_uops(i).sdm.last_end        := io.enq.bits.last_end.valid && io.enq.bits.last_end.bits === i.U
         in_uops(i).sdm.load_prediction := io.enq.bits.load_prediction(i)
+        in_uops(i).sdm.prefetch        := io.enq.bits.prefetch.valid && io.enq.bits.prefetch.bits === i.U
       }
 
       in_mask(i)                := io.enq.valid && io.enq.bits.mask(i)

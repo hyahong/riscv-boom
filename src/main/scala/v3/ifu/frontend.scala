@@ -208,6 +208,7 @@ class FetchBundle(implicit p: Parameters) extends BoomBundle
   val last_end        = Valid(UInt(log2Ceil(fetchWidth).W))
   val load_prediction = Vec(fetchWidth, Valid(Bool()))
   val predicted_miss  = Valid(UInt(log2Ceil(fetchWidth).W))
+  val prefetch        = Valid(UInt(log2Ceil(fetchWidth).W)) // accepted switch, not just a prediction
   val next_pc         = UInt(vaddrBitsExtended.W)
   val edge_inst       = Vec(nBanks, Bool()) // True if 1st instruction in this bundle is pc - 2
   val insts           = Vec(fetchWidth, Bits(32.W))
@@ -694,6 +695,7 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
   f3_fetch_bundle.context := f3_imemresp.context
   f3_fetch_bundle.saved_tail := 0.U.asTypeOf(f3_fetch_bundle.saved_tail)
   f3_fetch_bundle.last_end := 0.U.asTypeOf(f3_fetch_bundle.last_end)
+  f3_fetch_bundle.prefetch := 0.U.asTypeOf(f3_fetch_bundle.prefetch)
   f3_fetch_bundle.ftq_idx := 0.U // This gets assigned later
   f3_fetch_bundle.xcpt_pf_if := f3_imemresp.xcpt.pf.inst
   f3_fetch_bundle.xcpt_ae_if := f3_imemresp.xcpt.ae.inst

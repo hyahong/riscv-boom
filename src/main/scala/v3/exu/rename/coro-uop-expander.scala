@@ -260,7 +260,7 @@ class CoroUopExpander(implicit p: Parameters) extends BoomModule
       held_origins := origins
     }
     for (w <- 0 until coreWidth) {
-      when (fired(w) && !io.out(w).bits.is_internal) {
+      when (fired(w) && (!io.out(w).bits.is_internal || io.out(w).bits.is_sdm_prefetch)) {
         last_origin := CoroUopExpander.copyUop(io.out(w).bits)
         last_origin_valid := true.B
       }
@@ -271,7 +271,8 @@ class CoroUopExpander(implicit p: Parameters) extends BoomModule
     assert(io.in.bits.map(_.valid).reduce(_ || _), "expander input packet must not be empty")
     for (w <- 0 until coreWidth) {
       when (io.in.bits(w).valid) {
-        assert(!io.in.bits(w).bits.is_internal, "expander input must contain original uops")
+        assert(!io.in.bits(w).bits.is_internal || io.in.bits(w).bits.is_sdm_prefetch,
+          "expander input must contain original uops or converted prefetch")
       }
     }
   }

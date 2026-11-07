@@ -48,6 +48,7 @@ class SDMMicroOpMetadata(implicit p: Parameters) extends BoomBundle
   val last_end        = Bool()
   val load_prediction = Valid(Bool()) // true: predicted L1 miss, false: predicted hit
   val prefetch        = Bool() // accepted prediction switch. convert this load before rename
+  val resume_load     = Bool() // this dynamic load must execute instead of switching again
 }
 
 object SDMFrame

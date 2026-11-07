@@ -31,6 +31,7 @@ import boom.v3.util._
 class FrontendResp(implicit p: Parameters) extends BoomBundle()(p) {
   val pc = UInt(vaddrBitsExtended.W)  // ID stage PC
   val context = new SDMContextTag
+  val resume_load = Bool() // only the instruction starting at pc is protected
   val data = UInt((fetchWidth * coreInstBits).W)
   val mask = UInt(fetchWidth.W)
   val xcpt = new FrontendExceptions
@@ -209,6 +210,7 @@ class FetchBundle(implicit p: Parameters) extends BoomBundle
   val load_prediction = Vec(fetchWidth, Valid(Bool()))
   val predicted_miss  = Valid(UInt(log2Ceil(fetchWidth).W))
   val prefetch        = Valid(UInt(log2Ceil(fetchWidth).W)) // accepted switch, not just a prediction
+  val resume_load     = Valid(UInt(log2Ceil(fetchWidth).W))
   val next_pc         = UInt(vaddrBitsExtended.W)
   val edge_inst       = Vec(nBanks, Bool()) // True if 1st instruction in this bundle is pc - 2
   val insts           = Vec(fetchWidth, Bits(32.W))
@@ -270,7 +272,10 @@ class FetchBundle(implicit p: Parameters) extends BoomBundle
       }
     }
 
-    val misses = VecInit(load_prediction.map(p => p.valid && p.bits)).asUInt
+    // keep the original prediction for training
+    val misses = VecInit((0 until fetchWidth).map(i =>
+      load_prediction(i).valid && load_prediction(i).bits &&
+        !(resume_load.valid && resume_load.bits === i.U))).asUInt
     predicted_miss.valid := misses.orR
     predicted_miss.bits := Mux(misses.orR, PriorityEncoder(misses), 0.U)
   }
@@ -325,6 +330,7 @@ class BoomFrontendIO(implicit p: Parameters) extends BoomBundle
   val redirect_val     = Output(Bool()) // Redirect the frontend?
   val redirect_pc      = Output(UInt()) // Where do we redirect to?
   val redirect_context = Output(new SDMContextTag)
+  val redirect_resume_load = Output(Bool())
   val redirect_ftq_idx = Output(UInt()) // Which ftq entry should we reset to?
   val redirect_ghist   = Output(new GlobalHistory) // What are we setting as the global history?
 
@@ -401,6 +407,7 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
   val coro_transition = if (enableSDM) Some(Module(new CoroTransition)) else None
   val target_pc = WireInit(0.U(vaddrBitsExtended.W))
   val target_context = WireInit(0.U.asTypeOf(new SDMContextTag))
+  val target_resume_load = WireInit(false.B)
   val target_ghist = WireInit(0.U.asTypeOf(new GlobalHistory))
 
   // in ROB flush, make the FTQ use this history
@@ -432,6 +439,7 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
 
     target_context := io.cpu.context_redirect.bits.context
     target_pc := Mux(target_context.is_coro, buffer.io.pc, io.cpu.context_redirect.bits.host_pc)
+    target_resume_load := target_context.is_coro && buffer.io.resume_load
 
     io.cpu.context_redirect.ready := !reset.asBool && !io.cpu.context_init.valid &&
       !io.cpu.sfence.valid && !io.cpu.redirect_flush && !io.cpu.redirect_val
@@ -455,6 +463,7 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
 
   val s0_vpc       = WireInit(0.U(vaddrBitsExtended.W))
   val s0_context   = WireInit(0.U.asTypeOf(new SDMContextTag))
+  val s0_resume_load = WireInit(false.B)
   val s0_ghist     = WireInit((0.U).asTypeOf(new GlobalHistory))
   val s0_tsrc      = WireInit(0.U(BSRC_SZ.W))
   val s0_valid     = WireInit(false.B)
@@ -486,6 +495,7 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
   // --------------------------------------------------------
   val s1_vpc       = RegNext(s0_vpc)
   val s1_context   = RegNext(s0_context)
+  val s1_resume_load = RegNext(s0_resume_load)
   val s1_valid     = RegNext(s0_valid, false.B)
   val s1_ghist     = RegNext(s0_ghist)
   val s1_is_replay = RegNext(s0_is_replay)
@@ -539,6 +549,7 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
     s0_tsrc      := BSRC_1
     s0_vpc       := f1_predicted_target
     s0_context   := s1_context
+    s0_resume_load := false.B
     s0_ghist     := f1_predicted_ghist
     s0_is_replay := false.B
   }
@@ -550,6 +561,7 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
   val s2_valid = RegNext(s1_valid && !f1_clear, false.B)
   val s2_vpc   = RegNext(s1_vpc)
   val s2_context = RegNext(s1_context)
+  val s2_resume_load = RegNext(s1_resume_load)
   val s2_ghist = Reg(new GlobalHistory)
   s2_ghist := s1_ghist
   val s2_ppc  = RegNext(s1_ppc)
@@ -588,13 +600,15 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
     false.B)
 
   val f2_correct_f1_ghist = s1_ghist =/= f2_predicted_ghist && enableGHistStallRepair.B
-  val f2_s1_context_match = sameContext(s2_context, s1_context)
+  // predicted successor is an ordinary fetch, even if it loops to the same PC
+  val f2_s1_context_match = sameContext(s2_context, s1_context) && !s1_resume_load
 
   when ((s2_valid && !icache.io.resp.valid) ||
         (s2_valid && icache.io.resp.valid && !f3_ready)) {
     s0_valid := (!s2_tlb_resp.ae.inst && !s2_tlb_resp.pf.inst) || s2_is_replay || s2_tlb_miss
     s0_vpc   := s2_vpc
     s0_context := s2_context
+    s0_resume_load := s2_resume_load
     s0_is_replay := s2_valid && icache.io.resp.valid
     // When this is not a replay (it queried the BPDs, we should use f3 resp in the replaying s1)
     s0_s1_use_f3_bpd_resp := !s2_is_replay
@@ -612,6 +626,7 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
       s0_valid     := !((s2_tlb_resp.ae.inst || s2_tlb_resp.pf.inst) && !s2_is_replay)
       s0_vpc       := f2_predicted_target
       s0_context   := s2_context
+      s0_resume_load := false.B
       s0_is_replay := false.B
       s0_ghist     := f2_predicted_ghist
       s2_fsrc      := BSRC_2
@@ -644,6 +659,7 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
   )
   f3.io.enq.bits.pc := s2_vpc
   f3.io.enq.bits.context := s2_context
+  f3.io.enq.bits.resume_load := s2_resume_load
   f3.io.enq.bits.data  := Mux(s2_xcpt, 0.U, icache.io.resp.bits.data)
   f3.io.enq.bits.ghist := s2_ghist
   f3.io.enq.bits.mask := fetchMask(s2_vpc)
@@ -683,6 +699,7 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
   val f3_shadowed_mask = Wire(Vec(fetchWidth, Bool()))
   val f3_fetch_bundle = Wire(new FetchBundle)
   val f3_mask         = Wire(Vec(fetchWidth, Bool()))
+  val f3_resume_mask  = Wire(Vec(fetchWidth, Bool()))
   val f3_br_mask      = Wire(Vec(fetchWidth, Bool()))
   val f3_end_mask     = Wire(Vec(fetchWidth, Bool()))
   val f3_call_mask    = Wire(Vec(fetchWidth, Bool()))
@@ -707,6 +724,7 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
   val f3_prev_half    = Reg(UInt(16.W))
   // Tracks if last fetchpacket contained a half-inst
   val f3_prev_is_half = RegInit(false.B)
+  val f3_prev_resume_load = RegInit(false.B)
   val f3_prev_context = Reg(new SDMContextTag)
   val f3_prev_context_match = sameContext(f3_prev_context, f3_imemresp.context)
 
@@ -715,6 +733,7 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
   var redirect_found = false.B
   var end_found = false.B
   var bank_prev_is_half = f3_prev_is_half && f3_prev_context_match
+  var bank_prev_resume_load = f3_prev_resume_load && f3_prev_context_match
   var bank_prev_half    = f3_prev_half
   var last_inst = 0.U(16.W)
   for (b <- 0 until nBanks) {
@@ -811,6 +830,10 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
 
       bank_mask(w) := f3.io.deq.valid && f3_imemresp.mask(i) && valid && !redirect_found && !end_found
       f3_mask  (i) := f3.io.deq.valid && f3_imemresp.mask(i) && valid && !redirect_found && !end_found
+      val resume_at_pc = f3_imemresp.resume_load &&
+        f3_imemresp.pc === f3_aligned_pc + (i * coreInstBytes).U
+      f3_resume_mask(i) := enableSDM.B && f3_imemresp.context.is_coro && f3_mask(i) &&
+        Mux((w == 0).B && bank_prev_is_half, bank_prev_resume_load, resume_at_pc)
       // is this SDM end instruction?
       f3_end_mask(i) := enableSDM.B && f3_imemresp.context.is_coro && f3_mask(i) && !f3_fetch_bundle.xcpt_pf_if &&
         !f3_fetch_bundle.xcpt_ae_if && SDMInstructions.END === f3_fetch_bundle.exp_insts(i)
@@ -874,6 +897,10 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
     bank_prev_is_half = Mux(f3_bank_mask(b),
       (!(bank_mask(bankWidth-2) && !isRVC(bank_insts(bankWidth-2))) && !isRVC(last_inst)),
       bank_prev_is_half)
+    bank_prev_resume_load = Mux(f3_bank_mask(b),
+      bank_prev_is_half && f3_imemresp.resume_load &&
+        f3_imemresp.pc === f3_aligned_pc + ((b + 1) * bankBytes - coreInstBytes).U,
+      bank_prev_resume_load)
     bank_prev_half    = Mux(f3_bank_mask(b),
       last_inst(15,0),
       bank_prev_half)
@@ -887,6 +914,8 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
   f3_fetch_bundle.ghist    := f3.io.deq.bits.ghist
   f3_fetch_bundle.lhist    := f3_bpd_resp.io.deq.bits.lhist
   f3_fetch_bundle.bpd_meta := f3_bpd_resp.io.deq.bits.meta
+  f3_fetch_bundle.resume_load.valid := f3_resume_mask.asUInt.orR
+  f3_fetch_bundle.resume_load.bits := PriorityEncoder(f3_resume_mask)
   f3_fetch_bundle.setLoadPredictions(f3_bpd_resp.io.deq.bits.preds)
 
   f3_fetch_bundle.end_half.valid := bank_prev_is_half
@@ -896,6 +925,7 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
     f3_prev_is_half := bank_prev_is_half
     f3_prev_half    := bank_prev_half
     f3_prev_context := f3_imemresp.context
+    f3_prev_resume_load := bank_prev_resume_load
     assert(f3_bpd_resp.io.deq.bits.pc === f3_fetch_bundle.pc)
   }
 
@@ -939,8 +969,8 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
 
   val f3_correct_f1_ghist = s1_ghist =/= f3_predicted_ghist && enableGHistStallRepair.B
   val f3_correct_f2_ghist = s2_ghist =/= f3_predicted_ghist && enableGHistStallRepair.B
-  val f3_s1_context_match = sameContext(f3_imemresp.context, s1_context)
-  val f3_s2_context_match = sameContext(f3_imemresp.context, s2_context)
+  val f3_s1_context_match = sameContext(f3_imemresp.context, s1_context) && !s1_resume_load
+  val f3_s2_context_match = sameContext(f3_imemresp.context, s2_context) && !s2_resume_load
 
   when (f3.io.deq.valid && f4_ready) {
     when (f3_fetch_bundle.cfi_is_call && f3_fetch_bundle.cfi_idx.valid) {
@@ -962,6 +992,7 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
       s0_valid     := !(f3_fetch_bundle.xcpt_pf_if || f3_fetch_bundle.xcpt_ae_if)
       s0_vpc       := f3_predicted_target
       s0_context   := f3_imemresp.context
+      s0_resume_load := false.B
       s0_is_replay := false.B
       s0_ghist     := f3_predicted_ghist
       s0_tsrc      := BSRC_3
@@ -1041,6 +1072,7 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
       buffer.io.target_cid := transition.io.response.bits.next_cid.bits
       target_context.is_coro := true.B
       target_context.cid := transition.io.response.bits.next_cid.bits
+      target_resume_load := buffer.io.resume_load
       target_ghist := f3_predicted_ghist
     }
 
@@ -1175,6 +1207,7 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
     s0_valid     := true.B
     s0_vpc       := target_pc
     s0_context   := target_context
+    s0_resume_load := target_resume_load
     s0_ghist     := target_ghist
     s0_is_replay := false.B
     s0_tsrc      := BSRC_3
@@ -1190,6 +1223,7 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
 
     s0_valid     := false.B
     s0_vpc       := io.cpu.sfence.bits.addr
+    s0_resume_load := false.B
     s0_is_replay := false.B
     s0_is_sfence := true.B
 
@@ -1205,6 +1239,8 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
     s0_valid     := io.cpu.redirect_val || context_redirect_fire
     s0_vpc       := Mux(context_redirect_fire, target_pc, io.cpu.redirect_pc)
     if (enableSDM) s0_context := Mux(context_redirect_fire, target_context, io.cpu.redirect_context)
+    if (enableSDM) s0_resume_load := Mux(context_redirect_fire, target_resume_load,
+      io.cpu.redirect_context.is_coro && io.cpu.redirect_resume_load)
     s0_ghist     := Mux(context_redirect_fire, target_ghist, io.cpu.redirect_ghist)
     s0_tsrc      := BSRC_C
     s0_is_replay := false.B

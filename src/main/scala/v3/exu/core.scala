@@ -387,6 +387,7 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
   io.ifu.redirect_flush       := false.B
 
   io.ifu.redirect_context       := 0.U.asTypeOf(io.ifu.redirect_context)
+  io.ifu.redirect_resume_load   := false.B
   io.ifu.context_init           := 0.U.asTypeOf(io.ifu.context_init)
   io.ifu.context_redirect.valid := false.B
   io.ifu.context_redirect.bits  := 0.U.asTypeOf(io.ifu.context_redirect.bits)
@@ -432,11 +433,15 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
   // This discrepency should be resolved elsewhere.
   // Match the one-cycle delay of the flush PC metadata and redirect valid.
   val flush_context = RegNext(rob.io.flush.bits.context)
+  val flush_resume_load = RegNext(rob.io.flush_uop.sdm.resume_load)
   when (RegNext(rob.io.flush.valid)) {
     io.ifu.redirect_val   := true.B
     io.ifu.redirect_flush := true.B
     if (enableSDM) io.ifu.redirect_context := flush_context
     val flush_typ = RegNext(rob.io.flush.bits.flush_typ)
+    if (enableSDM) {
+      io.ifu.redirect_resume_load := FlushTypes.useSamePC(flush_typ) && flush_resume_load
+    }
     // Clear the global history when we flush the ROB (exceptions, AMOs, unique instructions, etc.)
     val new_ghist = WireInit((0.U).asTypeOf(new GlobalHistory))
     new_ghist.current_saw_branch_not_taken := true.B

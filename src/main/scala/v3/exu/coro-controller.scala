@@ -140,7 +140,8 @@ class CoroController(implicit p: Parameters) extends BoomModule
   val other_active = io.committed_active & ~candidate_mask
   val resume_protected = (resume_pending & candidate_mask).orR
   io.miss_eligible := enableSDM.B && io.miss_candidate.valid && other_active.orR &&
-    state === s_running && !io.last_end && !io.flush && !io.rob_flush && !recovering && !resume_protected
+    state === s_running && !io.last_end && !io.flush && !io.rob_flush && !recovering &&
+    !resume_protected && !io.miss_candidate.bits.sdm.resume_load
 
   // forwad the port for after uses
   io.exception_request := io.miss_eligible

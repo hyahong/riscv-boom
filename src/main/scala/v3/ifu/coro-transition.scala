@@ -71,4 +71,5 @@ class CoroTransition(implicit p: Parameters) extends BoomModule
   io.entry.bits.cid    := request.cid
   io.entry.bits.pc     := request.pc
   io.entry.bits.active := next_active
+  io.entry.bits.resume_load := !request.is_end
 }

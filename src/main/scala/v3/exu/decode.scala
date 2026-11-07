@@ -640,9 +640,12 @@ class DecodeUnit(implicit p: Parameters) extends BoomModule
 
   // only accepted frontend transition converts the load
   uop.sdm.prefetch := false.B
+  uop.sdm.resume_load := enableSDM.B && io.enq.uop.sdm.resume_load &&
+    io.enq.uop.sdm.context.is_coro && !io.enq.uop.is_internal &&
+    cs.legal && cs.uopc === uopLD && cs.mem_cmd === M_XRD && cs.dst_type === RT_FIX
   if (enableSDM) {
     when (io.enq.uop.sdm.prefetch && io.enq.uop.sdm.context.is_coro &&
-      !io.enq.uop.is_internal && !io.enq.uop.is_sfb && !xcpt_valid &&
+      !io.enq.uop.is_internal && !io.enq.uop.is_sfb && !io.enq.uop.sdm.resume_load && !xcpt_valid &&
       cs.legal && cs.uopc === uopLD && cs.mem_cmd === M_XRD && cs.dst_type === RT_FIX) {
       uop.uopc := uopPREFETCH
       uop.is_internal := true.B

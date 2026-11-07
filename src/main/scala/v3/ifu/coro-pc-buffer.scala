@@ -12,6 +12,7 @@ class CoroPCBufferEntry(implicit p: Parameters) extends BoomBundle
   val cid = UInt(coroIdxBits.W)
   val pc = UInt(vaddrBitsExtended.W)
   val active = UInt(maxCoroContexts.W)
+  val resume_load = Bool() // PC points to the interrupted demand load
 }
 
 class CoroPCBufferInit(implicit p: Parameters) extends BoomBundle
@@ -38,7 +39,8 @@ class CoroPCBuffer(implicit p: Parameters) extends BoomModule
 
     val target_cid = Input(UInt(coroIdxBits.W))
 
-    val pc         = Output(UInt(vaddrBitsExtended.W))
+    val pc          = Output(UInt(vaddrBitsExtended.W))
+    val resume_load = Output(Bool())
 
     val active           = Output(UInt(maxCoroContexts.W))
     val committed_active = Output(UInt(maxCoroContexts.W))
@@ -50,6 +52,7 @@ class CoroPCBuffer(implicit p: Parameters) extends BoomModule
   })
 
   val base_pc     = RegInit(VecInit(Seq.fill(maxCoroContexts)(0.U(vaddrBitsExtended.W))))
+  val base_resume_load = RegInit(VecInit(Seq.fill(maxCoroContexts)(false.B)))
   val base_active = RegInit(0.U(maxCoroContexts.W))
   val entries     = Reg(Vec(numCoroPCEntries, new CoroPCBufferEntry))
 
@@ -82,6 +85,7 @@ class CoroPCBuffer(implicit p: Parameters) extends BoomModule
 
   when (io.init.valid) {
     base_pc      := io.init.bits.pc
+    base_resume_load.foreach(_ := false.B)
     base_active  := io.init.bits.active
     head         := 0.U
     tail         := 0.U
@@ -95,8 +99,10 @@ class CoroPCBuffer(implicit p: Parameters) extends BoomModule
     when (pending) {
       if (maxCoroContexts == 1) {
         base_pc(0) := entries(head_idx).pc
+        base_resume_load(0) := entries(head_idx).resume_load
       } else {
         base_pc(entries(head_idx).cid) := entries(head_idx).pc
+        base_resume_load(entries(head_idx).cid) := entries(head_idx).resume_load
       }
       base_active := entries(head_idx).active
       head := head + 1.U
@@ -145,6 +151,8 @@ class CoroPCBuffer(implicit p: Parameters) extends BoomModule
 
   // select the valid pc
   io.pc := Mux(matched.orR, Mux1H(newest, entries.map(_.pc)), fallback_pc)
+  val fallback_resume_load = if (maxCoroContexts == 1) base_resume_load(0) else base_resume_load(io.target_cid)
+  io.resume_load := Mux(matched.orR, Mux1H(newest, entries.map(_.resume_load)), fallback_resume_load)
 
   // always uses latest active bitmap
   val latest_idx = entryIndex(tail - 1.U)

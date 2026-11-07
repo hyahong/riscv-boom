@@ -697,7 +697,7 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
   val f3_targs        = Wire(Vec(fetchWidth, UInt(vaddrBitsExtended.W)))
   val f3_cfi_types    = Wire(Vec(fetchWidth, UInt(CFI_SZ.W)))
   val f3_shadowed_mask = Wire(Vec(fetchWidth, Bool()))
-  val f3_fetch_bundle = Wire(new FetchBundle)
+  val f3_decoded_bundle = Wire(new FetchBundle)
   val f3_mask         = Wire(Vec(fetchWidth, Bool()))
   val f3_resume_mask  = Wire(Vec(fetchWidth, Bool()))
   val f3_br_mask      = Wire(Vec(fetchWidth, Bool()))
@@ -706,19 +706,19 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
   val f3_ret_mask     = Wire(Vec(fetchWidth, Bool()))
   val f3_npc_plus4_mask = Wire(Vec(fetchWidth, Bool()))
   val f3_btb_mispredicts = Wire(Vec(fetchWidth, Bool()))
-  f3_fetch_bundle.mask := f3_mask.asUInt
-  f3_fetch_bundle.br_mask := f3_br_mask.asUInt
-  f3_fetch_bundle.pc := f3_imemresp.pc
-  f3_fetch_bundle.context := f3_imemresp.context
-  f3_fetch_bundle.saved_tail := 0.U.asTypeOf(f3_fetch_bundle.saved_tail)
-  f3_fetch_bundle.last_end := 0.U.asTypeOf(f3_fetch_bundle.last_end)
-  f3_fetch_bundle.prefetch := 0.U.asTypeOf(f3_fetch_bundle.prefetch)
-  f3_fetch_bundle.ftq_idx := 0.U // This gets assigned later
-  f3_fetch_bundle.xcpt_pf_if := f3_imemresp.xcpt.pf.inst
-  f3_fetch_bundle.xcpt_ae_if := f3_imemresp.xcpt.ae.inst
-  f3_fetch_bundle.fsrc := f3_imemresp.fsrc
-  f3_fetch_bundle.tsrc := f3_imemresp.tsrc
-  f3_fetch_bundle.shadowed_mask := f3_shadowed_mask
+  f3_decoded_bundle.mask := f3_mask.asUInt
+  f3_decoded_bundle.br_mask := f3_br_mask.asUInt
+  f3_decoded_bundle.pc := f3_imemresp.pc
+  f3_decoded_bundle.context := f3_imemresp.context
+  f3_decoded_bundle.saved_tail := 0.U.asTypeOf(f3_decoded_bundle.saved_tail)
+  f3_decoded_bundle.last_end := 0.U.asTypeOf(f3_decoded_bundle.last_end)
+  f3_decoded_bundle.prefetch := 0.U.asTypeOf(f3_decoded_bundle.prefetch)
+  f3_decoded_bundle.ftq_idx := 0.U
+  f3_decoded_bundle.xcpt_pf_if := f3_imemresp.xcpt.pf.inst
+  f3_decoded_bundle.xcpt_ae_if := f3_imemresp.xcpt.ae.inst
+  f3_decoded_bundle.fsrc := f3_imemresp.fsrc
+  f3_decoded_bundle.tsrc := f3_imemresp.tsrc
+  f3_decoded_bundle.shadowed_mask := f3_shadowed_mask
 
   // Tracks trailing 16b of previous fetch packet
   val f3_prev_half    = Reg(UInt(16.W))
@@ -770,11 +770,11 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
 
         when (bank_prev_is_half) {
           bank_insts(w)                := inst0
-          f3_fetch_bundle.insts(i)     := inst0
-          f3_fetch_bundle.exp_insts(i) := exp_inst0
+          f3_decoded_bundle.insts(i)     := inst0
+          f3_decoded_bundle.exp_insts(i) := exp_inst0
           bpu.io.pc                    := pc0
           brsigs                       := bpd_decoder0.io.out
-          f3_fetch_bundle.edge_inst(b) := true.B
+          f3_decoded_bundle.edge_inst(b) := true.B
           if (b > 0) {
             val inst0b     = Cat(bank_data(15,0), last_inst)
             val exp_inst0b = ExpandRVC(inst0b)
@@ -784,18 +784,18 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
 
             when (f3_bank_mask(b-1)) {
               bank_insts(w)                := inst0b
-              f3_fetch_bundle.insts(i)     := inst0b
-              f3_fetch_bundle.exp_insts(i) := exp_inst0b
+              f3_decoded_bundle.insts(i)     := inst0b
+              f3_decoded_bundle.exp_insts(i) := exp_inst0b
               brsigs                       := bpd_decoder0b.io.out
             }
           }
         } .otherwise {
           bank_insts(w)                := inst1
-          f3_fetch_bundle.insts(i)     := inst1
-          f3_fetch_bundle.exp_insts(i) := exp_inst1
+          f3_decoded_bundle.insts(i)     := inst1
+          f3_decoded_bundle.exp_insts(i) := exp_inst1
           bpu.io.pc                    := pc1
           brsigs                       := bpd_decoder1.io.out
-          f3_fetch_bundle.edge_inst(b) := false.B
+          f3_decoded_bundle.edge_inst(b) := false.B
         }
         valid := true.B
       } else {
@@ -807,8 +807,8 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
         bpd_decoder.io.pc   := pc
 
         bank_insts(w)                := inst
-        f3_fetch_bundle.insts(i)     := inst
-        f3_fetch_bundle.exp_insts(i) := exp_inst
+        f3_decoded_bundle.insts(i)     := inst
+        f3_decoded_bundle.exp_insts(i) := exp_inst
         bpu.io.pc                    := pc
         brsigs                       := bpd_decoder.io.out
         if (w == 1) {
@@ -835,8 +835,8 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
       f3_resume_mask(i) := enableSDM.B && f3_imemresp.context.is_coro && f3_mask(i) &&
         Mux((w == 0).B && bank_prev_is_half, bank_prev_resume_load, resume_at_pc)
       // is this SDM end instruction?
-      f3_end_mask(i) := enableSDM.B && f3_imemresp.context.is_coro && f3_mask(i) && !f3_fetch_bundle.xcpt_pf_if &&
-        !f3_fetch_bundle.xcpt_ae_if && SDMInstructions.END === f3_fetch_bundle.exp_insts(i)
+      f3_end_mask(i) := enableSDM.B && f3_imemresp.context.is_coro && f3_mask(i) && !f3_decoded_bundle.xcpt_pf_if &&
+        !f3_decoded_bundle.xcpt_ae_if && SDMInstructions.END === f3_decoded_bundle.exp_insts(i)
       f3_targs (i) := Mux(brsigs.cfi_type === CFI_JALR,
         f3_bpd_resp.io.deq.bits.preds(i).predicted_pc.bits,
         brsigs.target)
@@ -863,16 +863,16 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
       lower_mask := UIntToOH(i.U)
       upper_mask := UIntToOH(offset_from_aligned_pc(log2Ceil(fetchBytes)+1,1)) << Mux(f3_is_last_bank_in_block, bankWidth.U, 0.U)
 
-      f3_fetch_bundle.sfbs(i) := (
+      f3_decoded_bundle.sfbs(i) := (
         f3_mask(i) &&
         brsigs.sfb_offset.valid &&
         (offset_from_aligned_pc <= Mux(f3_is_last_bank_in_block, (fetchBytes+bankBytes).U,(2*fetchBytes).U))
       )
-      f3_fetch_bundle.sfb_masks(i)       := ~MaskLower(lower_mask) & ~MaskUpper(upper_mask)
-      f3_fetch_bundle.shadowable_mask(i) := (!(f3_fetch_bundle.xcpt_pf_if || f3_fetch_bundle.xcpt_ae_if || bpu.io.debug_if || bpu.io.xcpt_if) &&
+      f3_decoded_bundle.sfb_masks(i)       := ~MaskLower(lower_mask) & ~MaskUpper(upper_mask)
+      f3_decoded_bundle.shadowable_mask(i) := (!(f3_decoded_bundle.xcpt_pf_if || f3_decoded_bundle.xcpt_ae_if || bpu.io.debug_if || bpu.io.xcpt_if) &&
                                              f3_bank_mask(b) &&
                                              (brsigs.shadowable || !f3_mask(i)))
-      f3_fetch_bundle.sfb_dests(i)       := offset_from_aligned_pc
+      f3_decoded_bundle.sfb_dests(i)       := offset_from_aligned_pc
 
       // Redirect if
       //  1) its a JAL/JALR (unconditional)
@@ -887,8 +887,8 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
       f3_call_mask(i) := brsigs.is_call
       f3_ret_mask(i)  := brsigs.is_ret
 
-      f3_fetch_bundle.bp_debug_if_oh(i) := bpu.io.debug_if
-      f3_fetch_bundle.bp_xcpt_if_oh (i) := bpu.io.xcpt_if
+      f3_decoded_bundle.bp_debug_if_oh(i) := bpu.io.debug_if
+      f3_decoded_bundle.bp_xcpt_if_oh (i) := bpu.io.xcpt_if
 
       redirect_found = redirect_found || f3_redirects(i)
       end_found = end_found || f3_end_mask(i)
@@ -906,20 +906,26 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
       bank_prev_half)
   }
 
-  f3_fetch_bundle.cfi_type      := f3_cfi_types(f3_fetch_bundle.cfi_idx.bits)
-  f3_fetch_bundle.cfi_is_call   := f3_call_mask(f3_fetch_bundle.cfi_idx.bits)
-  f3_fetch_bundle.cfi_is_ret    := f3_ret_mask (f3_fetch_bundle.cfi_idx.bits)
-  f3_fetch_bundle.cfi_npc_plus4 := f3_npc_plus4_mask(f3_fetch_bundle.cfi_idx.bits)
+  f3_decoded_bundle.cfi_type      := f3_cfi_types(f3_decoded_bundle.cfi_idx.bits)
+  f3_decoded_bundle.cfi_is_call   := f3_call_mask(f3_decoded_bundle.cfi_idx.bits)
+  f3_decoded_bundle.cfi_is_ret    := f3_ret_mask (f3_decoded_bundle.cfi_idx.bits)
+  f3_decoded_bundle.cfi_npc_plus4 := f3_npc_plus4_mask(f3_decoded_bundle.cfi_idx.bits)
 
-  f3_fetch_bundle.ghist    := f3.io.deq.bits.ghist
-  f3_fetch_bundle.lhist    := f3_bpd_resp.io.deq.bits.lhist
-  f3_fetch_bundle.bpd_meta := f3_bpd_resp.io.deq.bits.meta
-  f3_fetch_bundle.resume_load.valid := f3_resume_mask.asUInt.orR
-  f3_fetch_bundle.resume_load.bits := PriorityEncoder(f3_resume_mask)
-  f3_fetch_bundle.setLoadPredictions(f3_bpd_resp.io.deq.bits.preds)
+  f3_decoded_bundle.ghist    := f3.io.deq.bits.ghist
+  f3_decoded_bundle.lhist    := f3_bpd_resp.io.deq.bits.lhist
+  f3_decoded_bundle.bpd_meta := f3_bpd_resp.io.deq.bits.meta
+  f3_decoded_bundle.resume_load.valid := f3_resume_mask.asUInt.orR
+  f3_decoded_bundle.resume_load.bits := PriorityEncoder(f3_resume_mask)
+  f3_decoded_bundle.setLoadPredictions(f3_bpd_resp.io.deq.bits.preds)
 
-  f3_fetch_bundle.end_half.valid := bank_prev_is_half
-  f3_fetch_bundle.end_half.bits  := bank_prev_half
+  f3_decoded_bundle.end_half.valid := bank_prev_is_half
+  f3_decoded_bundle.end_half.bits  := bank_prev_half
+
+  f3_decoded_bundle.cfi_idx.valid := f3_redirects.reduce(_||_)
+  f3_decoded_bundle.cfi_idx.bits := PriorityEncoder(f3_redirects)
+  f3_decoded_bundle.ras_top := ras.io.read_addr
+  f3_decoded_bundle.next_pc := 0.U // Set below after the retained CFI is known.
+  val f3_fetch_bundle = WireInit(f3_decoded_bundle)
 
   when (f3.io.deq.fire) {
     f3_prev_is_half := bank_prev_is_half
@@ -933,17 +939,13 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
     f3_prev_is_half := false.B
   }
 
-  f3_fetch_bundle.cfi_idx.valid := f3_redirects.reduce(_||_)
-  f3_fetch_bundle.cfi_idx.bits  := PriorityEncoder(f3_redirects)
-
-  f3_fetch_bundle.ras_top := ras.io.read_addr
   // Redirect earlier stages only if the later stage
   // can consume this packet
 
-  val f3_predicted_target = Mux(f3_redirects.reduce(_||_),
+  val f3_predicted_target = Mux(f3_fetch_bundle.cfi_idx.valid,
     Mux(f3_fetch_bundle.cfi_is_ret && useBPD.B && useRAS.B,
       ras.io.read_addr,
-      f3_targs(PriorityEncoder(f3_redirects))
+      f3_targs(f3_fetch_bundle.cfi_idx.bits)
     ),
     nextFetch(f3_fetch_bundle.pc)
   )
@@ -976,7 +978,7 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
     when (f3_fetch_bundle.cfi_is_call && f3_fetch_bundle.cfi_idx.valid) {
       ras.io.write_valid := true.B
     }
-    when (f3_redirects.reduce(_||_)) {
+    when (f3_fetch_bundle.cfi_idx.valid) {
       f3_prev_is_half := false.B
     }
     when (s2_valid && s2_vpc === f3_predicted_target && f3_s2_context_match && !f3_correct_f2_ghist) {
@@ -1003,11 +1005,12 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
 
   // When f3 finds a btb mispredict, queue up a bpd correction update
   val f4_btb_corrections = Module(new Queue(new BranchPredictionUpdate, 2))
-  f4_btb_corrections.io.enq.valid := f3.io.deq.fire && f3_btb_mispredicts.reduce(_||_) && enableBTBFastRepair.B
+  val f3_btb_mispredict_mask = f3_btb_mispredicts.asUInt & f3_fetch_bundle.mask
+  f4_btb_corrections.io.enq.valid := f3.io.deq.fire && f3_btb_mispredict_mask.orR && enableBTBFastRepair.B
   f4_btb_corrections.io.enq.bits  := DontCare
   f4_btb_corrections.io.enq.bits.is_mispredict_update := false.B
   f4_btb_corrections.io.enq.bits.is_repair_update     := false.B
-  f4_btb_corrections.io.enq.bits.btb_mispredicts      := f3_btb_mispredicts.asUInt
+  f4_btb_corrections.io.enq.bits.btb_mispredicts      := f3_btb_mispredict_mask
   f4_btb_corrections.io.enq.bits.pc                   := f3_fetch_bundle.pc
   f4_btb_corrections.io.enq.bits.ghist                := f3_fetch_bundle.ghist
   f4_btb_corrections.io.enq.bits.lhist                := f3_fetch_bundle.lhist
@@ -1026,7 +1029,10 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
 
   val f3_has_end = f3_end_mask.asUInt.orR
   val f3_end_idx = PriorityEncoder(f3_end_mask)
+  val f3_predicted_miss = f3_decoded_bundle.predicted_miss
   val f3_transition_ready = WireInit(true.B)
+  val transition_fire = WireInit(false.B)
+  val prefetch_fire = WireInit(false.B)
   val end_fire = WireInit(false.B)
   val last_end_fire = WireInit(false.B)
   coro_transition.foreach { transition =>
@@ -1038,13 +1044,22 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
     transition.io.kill := io.cpu.context_init.valid || io.cpu.context_flush || io.cpu.context_kill ||
       io.cpu.redirect_flush || io.cpu.redirect_val || io.cpu.sfence.valid || context_redirect_fire ||
       (!confirmed && io.cpu.stop_fetch)
-    transition.io.request.valid := f3.io.deq.valid && f3_has_end
+
+    val other_active = buffer.io.active & ~UIntToOH(f3_imemresp.context.cid, maxCoroContexts)
+    val predict_switch = f3_predicted_miss.valid && other_active.orR && buffer.io.push.ready &&
+      (!f3_has_end || f3_predicted_miss.bits < f3_end_idx)
+    val transition_idx = Wire(Valid(UInt(log2Ceil(fetchWidth).W)))
+    transition_idx.valid := f3_has_end || predict_switch
+    transition_idx.bits := Mux(predict_switch, f3_predicted_miss.bits, f3_end_idx)
+    val transition_bank = if (nBanks == 1) 0.U else transition_idx.bits(log2Ceil(fetchWidth) - 1)
+    val transition_is_edge = transition_idx.bits(log2Ceil(bankWidth) - 1, 0) === 0.U &&
+      f3_decoded_bundle.edge_inst(transition_bank)
+    val transition_pc = f3_aligned_pc + (transition_idx.bits << 1) - Mux(transition_is_edge, 2.U, 0.U)
+
+    transition.io.request.valid := f3.io.deq.valid && transition_idx.valid
     transition.io.request.bits.cid := f3_imemresp.context.cid
-    val end_bank = if (nBanks == 1) 0.U else f3_end_idx(log2Ceil(fetchWidth) - 1)
-    val end_is_edge = f3_end_idx(log2Ceil(bankWidth) - 1, 0) === 0.U &&
-      f3_fetch_bundle.edge_inst(end_bank)
-    transition.io.request.bits.pc := f3_aligned_pc + (f3_end_idx << 1) + Mux(end_is_edge, 2.U, 4.U)
-    transition.io.request.bits.is_end := true.B
+    transition.io.request.bits.pc := Mux(predict_switch, transition_pc, transition_pc + 4.U)
+    transition.io.request.bits.is_end := !predict_switch
     transition.io.request.bits.confirmed := false.B
 
     transition.io.response.ready := f4.io.enq.ready && !f3_clear
@@ -1062,8 +1077,11 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
         "controller transition must record a confirmed miss")
     }
 
-    f3_transition_ready := !confirmed && !io.cpu.stop_fetch && (!f3_has_end || transition.io.response.valid)
-    end_fire := !confirmed && transition.io.response.fire
+    f3_transition_ready := !confirmed && !io.cpu.stop_fetch &&
+      (!transition_idx.valid || transition.io.response.valid)
+    transition_fire := !confirmed && transition.io.response.fire && transition.io.response.bits.recorded
+    prefetch_fire := transition_fire && predict_switch
+    end_fire := transition_fire && !predict_switch
     last_end_fire := end_fire && transition.io.response.bits.last_end
     io.cpu.last_end := last_end_fire
 
@@ -1076,23 +1094,47 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
       target_ghist := f3_predicted_ghist
     }
 
-    val transition_idx = Wire(Valid(UInt(log2Ceil(fetchWidth).W)))
-    transition_idx.valid := f3_has_end
-    transition_idx.bits := f3_end_idx
+    val prefetch_selected = !confirmed && predict_switch &&
+      transition.io.response.valid && transition.io.response.bits.recorded
+    f3_fetch_bundle.prefetch.valid := prefetch_selected
+    f3_fetch_bundle.prefetch.bits := f3_predicted_miss.bits
     f3_fetch_bundle.setSavedTail(buffer.io.tail, transition_idx)
-    f3_fetch_bundle.last_end.valid := !confirmed && f3_has_end && transition.io.response.bits.last_end
+    f3_fetch_bundle.last_end.valid := !confirmed && !predict_switch && f3_has_end &&
+      transition.io.response.bits.last_end
     f3_fetch_bundle.last_end.bits := f3_end_idx
 
-    when (f3_has_end) {
-      // we don't need this
+    when (prefetch_selected) {
+      val keep = MaskLower(UIntToOH(f3_predicted_miss.bits, fetchWidth))
+      f3_fetch_bundle.mask := f3_decoded_bundle.mask & keep
+      f3_fetch_bundle.br_mask := f3_decoded_bundle.br_mask & keep
+      val keep_cfi = f3_decoded_bundle.cfi_idx.valid &&
+        f3_decoded_bundle.cfi_idx.bits <= f3_predicted_miss.bits
+      f3_fetch_bundle.cfi_idx.valid := keep_cfi
+      f3_fetch_bundle.cfi_idx.bits := Mux(keep_cfi, f3_decoded_bundle.cfi_idx.bits, 0.U)
+      f3_fetch_bundle.cfi_type := Mux(keep_cfi, f3_decoded_bundle.cfi_type, CFI_X)
+      f3_fetch_bundle.cfi_is_call := keep_cfi && f3_decoded_bundle.cfi_is_call
+      f3_fetch_bundle.cfi_is_ret := keep_cfi && f3_decoded_bundle.cfi_is_ret
+      f3_fetch_bundle.cfi_npc_plus4 := keep_cfi && f3_decoded_bundle.cfi_npc_plus4
+      for (i <- 0 until fetchWidth) {
+        f3_fetch_bundle.load_prediction(i).valid := f3_decoded_bundle.load_prediction(i).valid && keep(i)
+        f3_fetch_bundle.load_prediction(i).bits := f3_decoded_bundle.load_prediction(i).bits && keep(i)
+      }
+    }
+    when (f3_has_end || predict_switch) {
       f3_fetch_bundle.sfbs.foreach(_ := false.B)
       f3_fetch_bundle.end_half.valid := false.B
     }
-    when (end_fire) {
+    when (transition_fire) {
       assert(f3.io.deq.fire && f4.io.enq.fire && buffer.io.push.fire,
-        "END and journal entry must be accepted together")
+        "frontend transition and journal entry must be accepted together")
       assert(transition.io.response.bits.last_end ^ transition.io.response.bits.next_cid.valid,
-        "END must either select a worker or terminate the run")
+        "frontend transition must either select a worker or terminate the run")
+    }
+    when (prefetch_fire) {
+      assert(f3_fetch_bundle.prefetch.valid && !f3_fetch_bundle.last_end.valid &&
+        transition.io.response.bits.next_cid.valid &&
+        buffer.io.push.bits.active === buffer.io.active,
+        "predicted switch must preserve active workers and mark the outgoing load")
     }
   }
 
@@ -1113,7 +1155,8 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
   })
   val f4_sfbs = VecInit((0 until fetchWidth) map { i =>
     enableSFBOpt.B &&
-    !f4.io.deq.bits.last_end.valid && !f3_has_end &&
+    !f4.io.deq.bits.last_end.valid && !f4.io.deq.bits.prefetch.valid &&
+    !f3_has_end && !f3_predicted_miss.valid &&
     f4_sfb_context_match &&
     ((~f4_shadowable_masks(i) === 0.U) &&
      (~f3_shadowable_masks(i) === 0.U) &&
@@ -1133,7 +1176,7 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
   val f4_sfb_mask  = f4.io.deq.bits.sfb_masks(f4_sfb_idx)
   // If we have a SFB, wait for next fetch to be available in f3
   val f4_delay     = (
-    !f4.io.deq.bits.last_end.valid &&
+    !f4.io.deq.bits.last_end.valid && !f4.io.deq.bits.prefetch.valid &&
     f4.io.deq.bits.sfbs.reduce(_||_) &&
     !f4.io.deq.bits.cfi_idx.valid &&
     !f4.io.enq.valid &&
@@ -1194,7 +1237,7 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
 
   // Preserve F4/FetchBuffer's accepted prefix, but discard speculative fetches after END.
   // Do not reset F3 here: its current packet must still transfer to F4 this cycle.
-  when (end_fire || (enableSDM.B && io.cpu.stop_fetch)) {
+  when (transition_fire || (enableSDM.B && io.cpu.stop_fetch)) {
     f1_clear := true.B
     f2_clear := true.B
     f3.io.enq.valid := false.B
@@ -1203,7 +1246,7 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
   }
 
   // switch to the next context
-  when (end_fire && !last_end_fire) {
+  when (transition_fire && !last_end_fire) {
     s0_valid     := true.B
     s0_vpc       := target_pc
     s0_context   := target_context
@@ -1211,6 +1254,7 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
     s0_ghist     := target_ghist
     s0_is_replay := false.B
     s0_tsrc      := BSRC_3
+    f3_fetch_bundle.next_pc := target_pc
     f3_fetch_bundle.fsrc := BSRC_3
   }
 

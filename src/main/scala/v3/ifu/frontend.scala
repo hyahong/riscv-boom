@@ -202,14 +202,16 @@ trait HasBoomFrontendParameters extends HasL1ICacheParameters
 class FetchBundle(implicit p: Parameters) extends BoomBundle
   with HasBoomFrontendParameters
 {
-  val pc            = UInt(vaddrBitsExtended.W)
-  val context       = new SDMContextTag
-  val saved_tail    = Vec(fetchWidth, Valid(UInt(coroPCBufferPtrBits.W)))
-  val last_end      = Valid(UInt(log2Ceil(fetchWidth).W))
-  val next_pc       = UInt(vaddrBitsExtended.W)
-  val edge_inst     = Vec(nBanks, Bool()) // True if 1st instruction in this bundle is pc - 2
-  val insts         = Vec(fetchWidth, Bits(32.W))
-  val exp_insts     = Vec(fetchWidth, Bits(32.W))
+  val pc              = UInt(vaddrBitsExtended.W)
+  val context         = new SDMContextTag
+  val saved_tail      = Vec(fetchWidth, Valid(UInt(coroPCBufferPtrBits.W)))
+  val last_end        = Valid(UInt(log2Ceil(fetchWidth).W))
+  val load_prediction = Vec(fetchWidth, Valid(Bool()))
+  val predicted_miss  = Valid(UInt(log2Ceil(fetchWidth).W))
+  val next_pc         = UInt(vaddrBitsExtended.W)
+  val edge_inst       = Vec(nBanks, Bool()) // True if 1st instruction in this bundle is pc - 2
+  val insts           = Vec(fetchWidth, Bits(32.W))
+  val exp_insts       = Vec(fetchWidth, Bits(32.W))
 
   // Information for sfb folding
   // NOTE: This IS NOT equivalent to uop.pc_lob, that gets calculated in the FB

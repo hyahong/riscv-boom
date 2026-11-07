@@ -253,6 +253,27 @@ class FetchBundle(implicit p: Parameters) extends BoomBundle
   // Source of the prediction to this bundle
   val tsrc    = UInt(BSRC_SZ.W)
 
+  def setLoadPredictions(predictions: Vec[BranchPrediction]): Unit = {
+    load_prediction := 0.U.asTypeOf(load_prediction)
+
+    if (enableSDM) {
+      for (i <- 0 until fetchWidth) {
+        val inst = exp_insts(i)
+        // not decoded yet, so check the binary
+        val is_load = inst(6, 0) === "b0000011".U && inst(14, 12) =/= "b111".U
+        val valid = context.is_coro && mask(i) && is_load &&
+          !xcpt_pf_if && !xcpt_ae_if && !bp_debug_if_oh(i) && !bp_xcpt_if_oh(i) &&
+          predictions(i).load_prediction.valid
+        load_prediction(i).valid := valid
+        load_prediction(i).bits := valid && predictions(i).load_prediction.bits
+      }
+    }
+
+    val misses = VecInit(load_prediction.map(p => p.valid && p.bits)).asUInt
+    predicted_miss.valid := misses.orR
+    predicted_miss.bits := Mux(misses.orR, PriorityEncoder(misses), 0.U)
+  }
+
   def setSavedTail(tail: UInt, transition_idx: Valid[UInt]): Unit = {
     saved_tail := 0.U.asTypeOf(saved_tail)
     if (enableSDM) {
@@ -864,6 +885,7 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
   f3_fetch_bundle.ghist    := f3.io.deq.bits.ghist
   f3_fetch_bundle.lhist    := f3_bpd_resp.io.deq.bits.lhist
   f3_fetch_bundle.bpd_meta := f3_bpd_resp.io.deq.bits.meta
+  f3_fetch_bundle.setLoadPredictions(f3_bpd_resp.io.deq.bits.preds)
 
   f3_fetch_bundle.end_half.valid := bank_prev_is_half
   f3_fetch_bundle.end_half.bits  := bank_prev_half

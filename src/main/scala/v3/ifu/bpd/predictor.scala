@@ -26,7 +26,8 @@ class BranchPrediction(implicit p: Parameters) extends BoomBundle()(p)
   // What is the target of his branch/jump? Do we know the target?
   val predicted_pc    = Valid(UInt(vaddrBitsExtended.W))
 
-
+  // Independent of branch direction/target. In F3, bits=true predicts an L1 load miss
+  val load_prediction = Valid(Bool())
 }
 
 // A branch prediction for a entire fetch-width worth of instructions

@@ -89,6 +89,7 @@ class LSUDMemIO(implicit p: Parameters, edge: TLEdgeOut) extends BoomBundle()(p)
   val nack        = Flipped(Vec(memWidth, new ValidIO(new BoomDCacheReq)))
   // cacheable load accepted by MSHR in DCache S2 (allocation or merge)
   val miss_ack    = Flipped(Vec(memWidth, Valid(new MicroOp)))
+  val load_result = Flipped(Vec(memWidth, Valid(new CoroLoadResult)))
   // line selected by a confirmed SDM head-miss flush
   val keep_refill = Output(Valid(UInt(corePAddrBits.W)))
 
@@ -131,6 +132,7 @@ class LSUCoreIO(implicit p: Parameters) extends BoomBundle()(p)
   val rob_head_load = Input(Valid(UInt(robAddrSz.W)))
 
   val miss_candidate = Output(Valid(new MicroOp))
+  val load_result = Output(Vec(memWidth, Valid(new CoroLoadResult)))
   val exception_request = Input(Bool())
   val keep_refill = Input(Valid(UInt(corePAddrBits.W)))
 
@@ -1367,6 +1369,24 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
   }
 
   val dmem_resp_fired = WireInit(widthMap(w => false.B))
+
+  io.core.load_result := 0.U.asTypeOf(io.core.load_result)
+  if (enableSDM) {
+    for (w <- 0 until memWidth) {
+      val result = io.dmem.load_result(w)
+      val uop = result.bits.uop
+      val entry = ldq(uop.ldq_idx)
+      val same_load = entry.valid && entry.bits.executed && !entry.bits.succeeded &&
+        entry.bits.uop.rob_idx === uop.rob_idx && entry.bits.uop.pdst === uop.pdst &&
+        entry.bits.uop.ftq_idx === uop.ftq_idx && entry.bits.uop.pc_lob === uop.pc_lob &&
+        entry.bits.uop.sdm.context.asUInt === uop.sdm.context.asUInt
+      io.core.load_result(w).valid := result.valid && CoroLoadResult.isTracked(uop) &&
+        (uop.is_sdm_prefetch || same_load) && !io.dmem.nack(w).valid &&
+        !io.core.exception && !IsKilledByBranch(io.core.brupdate, uop)
+      io.core.load_result(w).bits := result.bits
+      io.core.load_result(w).bits.uop.br_mask := GetNewBrMask(io.core.brupdate, uop)
+    }
+  }
 
   // MSHR request is accepted in S2 stage
   // it means that the load instruction occurs cache miss (L1)

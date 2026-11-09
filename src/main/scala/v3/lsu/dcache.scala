@@ -771,6 +771,24 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
     mshrs.io.req_is_probe(w)         := s2_type === t_probe && s2_valid(w)
   }
 
+  io.lsu.load_result := 0.U.asTypeOf(io.lsu.load_result)
+  if (enableSDM) {
+    for (w <- 0 until memWidth) {
+      val s1_observe = RegNext(s0_valid(w) && s0_type === t_lsu &&
+        !s0_req(w).is_hella && CoroLoadResult.isTracked(s0_req(w).uop) &&
+        !io.lsu.exception && !IsKilledByBranch(io.lsu.brupdate, s0_req(w).uop), false.B)
+      val s2_observe = RegNext(s1_observe && !io.lsu.s1_kill(w) &&
+        !io.lsu.exception && !IsKilledByBranch(io.lsu.brupdate, s1_req(w).uop), false.B)
+      val cacheable = edge.manager.supportsAcquireBFast(s2_req(w).addr, lgCacheBlockBytes.U)
+      io.lsu.load_result(w).valid := s2_observe && s2_valid(w) && cacheable &&
+        !s2_nack(w) && (s2_hit(w) || mshrs.io.req(w).fire) &&
+        !io.lsu.exception && !IsKilledByBranch(io.lsu.brupdate, s2_req(w).uop)
+      io.lsu.load_result(w).bits.uop := s2_req(w).uop
+      io.lsu.load_result(w).bits.uop.br_mask := GetNewBrMask(io.lsu.brupdate, s2_req(w).uop)
+      io.lsu.load_result(w).bits.miss := !s2_hit(w)
+    }
+  }
+
   mshrs.io.meta_resp.valid      := !s2_nack_hit(0) || prober.io.mshr_wb_rdy
   mshrs.io.meta_resp.bits       := Mux1H(s2_tag_match_way(0), RegNext(meta(0).io.resp))
   when (mshrs.io.req.map(_.fire).reduce(_||_)) { replacer.miss }

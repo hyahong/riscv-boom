@@ -51,6 +51,20 @@ class SDMMicroOpMetadata(implicit p: Parameters) extends BoomBundle
   val resume_load     = Bool() // this dynamic load must execute instead of switching again
 }
 
+class CoroLoadResult(implicit p: Parameters) extends BoomBundle with HasBoomUOP
+{
+  val miss = Bool()
+}
+
+object CoroLoadResult
+{
+  def isTracked(uop: MicroOp): Bool = {
+    uop.sdm.context.is_coro && (uop.is_sdm_prefetch ||
+      (!uop.is_internal && !uop.fp_val && uop.uses_ldq &&
+        uop.mem_cmd === freechips.rocketchip.rocket.M_XRD))
+  }
+}
+
 object SDMFrame
 {
   def index(context: SDMContextTag): UInt = {

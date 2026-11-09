@@ -76,7 +76,12 @@ class BranchPredictionUpdate(implicit p: Parameters) extends BoomBundle()(p)
   val is_repair_update = Bool()
   val btb_mispredicts = UInt(fetchWidth.W)
   def is_btb_mispredict_update = btb_mispredicts =/= 0.U
-  def is_commit_update = !(is_mispredict_update || is_repair_update || is_btb_mispredict_update)
+  def is_commit_update = !(is_mispredict_update || is_repair_update || is_btb_mispredict_update || load_idx.valid)
+
+  val load_idx = Valid(UInt(log2Ceil(fetchWidth).W))
+  val load_miss = Bool()
+  val load_prediction = Valid(Bool())
+  val load_alt_differs = Bool()
 
   val pc            = UInt(vaddrBitsExtended.W)
   // Mask of instructions which are branches.
@@ -116,7 +121,12 @@ class BranchPredictionBankUpdate(implicit p: Parameters) extends BoomBundle()(p)
   val btb_mispredicts  = UInt(bankWidth.W)
   def is_btb_mispredict_update = btb_mispredicts =/= 0.U
 
-  def is_commit_update = !(is_mispredict_update || is_repair_update || is_btb_mispredict_update)
+  def is_commit_update = !(is_mispredict_update || is_repair_update || is_btb_mispredict_update || load_idx.valid)
+
+  val load_idx = Valid(UInt(log2Ceil(bankWidth).W))
+  val load_miss = Bool()
+  val load_prediction = Valid(Bool())
+  val load_alt_differs = Bool()
 
   val pc               = UInt(vaddrBitsExtended.W)
 
@@ -405,6 +415,11 @@ class BranchPredictor(implicit p: Parameters) extends BoomModule()(p)
   for (i <- 0 until nBanks) {
     banked_predictors(i).io.update.bits.is_mispredict_update := io.update.bits.is_mispredict_update
     banked_predictors(i).io.update.bits.is_repair_update     := io.update.bits.is_repair_update
+    banked_predictors(i).io.update.bits.load_idx.valid       := false.B
+    banked_predictors(i).io.update.bits.load_idx.bits        := io.update.bits.load_idx.bits
+    banked_predictors(i).io.update.bits.load_miss            := io.update.bits.load_miss
+    banked_predictors(i).io.update.bits.load_prediction      := io.update.bits.load_prediction
+    banked_predictors(i).io.update.bits.load_alt_differs     := io.update.bits.load_alt_differs
 
     banked_predictors(i).io.update.bits.meta             := io.update.bits.meta(i)
     banked_predictors(i).io.update.bits.lhist            := io.update.bits.lhist(i)
@@ -492,6 +507,27 @@ class BranchPredictor(implicit p: Parameters) extends BoomModule()(p)
       banked_predictors(0).io.update.bits.ghist := io.update.bits.ghist.histories(1)
     }
 
+  }
+
+  // unlike a branch packet update, one load update targets exactly one bank
+  when (io.update.bits.load_idx.valid) {
+    val target_bank = if (nBanks == 1) 0.U else
+      bank(io.update.bits.pc) ^ (io.update.bits.load_idx.bits >= bankWidth.U).asUInt
+    for (i <- 0 until nBanks) {
+      banked_predictors(i).io.update.valid := io.update.valid && enableSDM.B && target_bank === i.U
+      banked_predictors(i).io.update.bits.load_idx.valid := target_bank === i.U
+      banked_lhist_providers(i).io.update.valid := false.B
+    }
+
+    when (io.update.valid) {
+      assert(!io.update.bits.br_mask.orR && !io.update.bits.cfi_idx.valid &&
+        !io.update.bits.is_mispredict_update && !io.update.bits.is_repair_update &&
+        !io.update.bits.btb_mispredicts.orR, "load feedback cannot be a branch update")
+      if (nBanks == 2) {
+        assert(!mayNotBeDualBanked(io.update.bits.pc) || io.update.bits.load_idx.bits < bankWidth.U,
+          "load feedback must address a fetched bank")
+      }
+    }
   }
 
   when (io.update.valid) {

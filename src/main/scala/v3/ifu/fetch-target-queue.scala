@@ -206,7 +206,11 @@ class FetchTargetQueue(implicit p: Parameters) extends BoomModule
   io.enq_idx := enq_ptr
 
   io.bpdupdate.valid := false.B
-  io.bpdupdate.bits  := DontCare
+  io.bpdupdate.bits := DontCare
+  io.bpdupdate.bits.load_idx := 0.U.asTypeOf(io.bpdupdate.bits.load_idx)
+  io.bpdupdate.bits.load_miss := false.B
+  io.bpdupdate.bits.load_prediction := 0.U.asTypeOf(io.bpdupdate.bits.load_prediction)
+  io.bpdupdate.bits.load_alt_differs := false.B
 
   when (io.deq.valid) {
     deq_ptr := io.deq.bits

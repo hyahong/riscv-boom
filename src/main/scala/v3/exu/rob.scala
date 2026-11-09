@@ -73,7 +73,7 @@ class RobIo(
 
   // Port for unmarking loads/stores as speculation hazards..
   val lsu_clr_unsafe   = Input(Vec(memWidth, Valid(UInt(robAddrSz.W))))
-
+  val lsu_load_result  = Input(Vec(memWidth, Valid(new CoroLoadResult)))
 
   // Track side-effects for debug purposes.
   // Also need to know when loads write back, whereas we don't need loads to unbusy.
@@ -124,6 +124,8 @@ class CommitSignals(implicit p: Parameters) extends BoomBundle
   val valids      = Vec(retireWidth, Bool()) // These instructions may not correspond to an architecturally executed insn
   val arch_valids = Vec(retireWidth, Bool()) // Excludes internal and predicated-off uops
   val uops        = Vec(retireWidth, new MicroOp())
+  // confirmed head miss uses flush.cause == MINI_EXCEPTION_SDM_MISS and flush_uop instead
+  val load_results = Vec(retireWidth, Valid(Bool())) // true: miss, false: hit
   val fflags      = Valid(UInt(5.W))
 
   // These come a cycle later
@@ -316,6 +318,34 @@ class Rob(
     val rob_uop       = Reg(Vec(numRobRows, new MicroOp()))
     val rob_exception = Reg(Vec(numRobRows, Bool()))
     val rob_predicated = Reg(Vec(numRobRows, Bool())) // Was this instruction predicated out?
+
+    io.commit.load_results(w) := 0.U.asTypeOf(io.commit.load_results(w))
+    if (enableSDM) {
+      // rob entry
+      val rob_load_result = Reg(Vec(numRobRows, Valid(Bool())))
+      when (io.enq_valids(w)) {
+        rob_load_result(rob_tail) := 0.U.asTypeOf(rob_load_result(rob_tail))
+      }
+      for (result <- io.lsu_load_result) {
+        val uop = result.bits.uop
+        val row = GetRowIdx(uop.rob_idx)
+        val resident = rob_uop(row)
+        val same_uop = resident.uopc === uop.uopc && resident.pdst === uop.pdst &&
+          resident.ldq_idx === uop.ldq_idx && resident.ftq_idx === uop.ftq_idx &&
+          resident.pc_lob === uop.pc_lob && resident.sdm.context.asUInt === uop.sdm.context.asUInt
+        when (result.valid && MatchBank(GetBankIdx(uop.rob_idx)) &&
+          rob_val(row) && rob_bsy(row) && same_uop && CoroLoadResult.isTracked(resident) &&
+          !rob_load_result(row).valid && !io.flush.valid && rob_state =/= s_rollback &&
+          !IsKilledByBranch(io.brupdate, uop) && !IsKilledByBranch(io.brupdate, resident) &&
+          !(io.enq_valids(w) && row === rob_tail)) {
+          rob_load_result(row).valid := true.B
+          rob_load_result(row).bits := result.bits.miss
+        }
+      }
+      io.commit.load_results(w) := rob_load_result(com_idx)
+      io.commit.load_results(w).valid := rob_val(com_idx) && !rob_predicated(com_idx) &&
+        rob_load_result(com_idx).valid
+    }
 
     val rob_debug_wdata = Mem(numRobRows, UInt(xLen.W))
 

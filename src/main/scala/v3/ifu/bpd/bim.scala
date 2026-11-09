@@ -123,9 +123,19 @@ class BIMBranchPredictorBank(params: BoomBIMParams = BoomBIMParams())(implicit p
     }
   }
 
+  // load-miss prediction
+  val s3_load_valid = if (enableSDM) {
+    RegNext(RegNext(RegNext(s0_valid && !doing_reset, false.B), false.B), false.B)
+  } else false.B
+
   for (w <- 0 until bankWidth) {
     io.resp.f2(w).taken := s2_resp(w)
     io.resp.f3(w).taken := RegNext(io.resp.f2(w).taken)
+    if (enableSDM) {
+      val valid = s3_load_valid && s3_mask(w)
+      io.resp.f3(w).load_prediction.valid := valid
+      io.resp.f3(w).load_prediction.bits := valid && io.resp.f3(w).taken
+    }
   }
   io.f3_meta := RegNext(s2_meta.asUInt)
 }

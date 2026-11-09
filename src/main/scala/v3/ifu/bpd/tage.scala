@@ -254,8 +254,14 @@ class TageBranchPredictorBank(params: BoomTageParams = BoomTageParams())(implici
   for (w <- 0 until bankWidth) {
     var altpred = io.resp_in(0).f3(w).taken
     val final_altpred = WireInit(io.resp_in(0).f3(w).taken)
+
+    var load_altpred = io.resp_in(0).f3(w).load_prediction.bits
+    var load_alt_valid = io.resp_in(0).f3(w).load_prediction.valid
+    val load_prediction = WireInit(io.resp_in(0).f3(w).load_prediction)
+
     var provided = false.B
     var provider = 0.U
+
     io.resp.f3(w).taken := io.resp_in(0).f3(w).taken
 
     for (i <- 0 until tageNTables) {
@@ -265,10 +271,24 @@ class TageBranchPredictorBank(params: BoomTageParams = BoomTageParams())(implici
         io.resp.f3(w).taken := Mux(ctr === 3.U || ctr === 4.U, altpred, ctr(2))
         final_altpred       := altpred
       }
+      if (enableSDM) {
+        val weak = ctr === 3.U || ctr === 4.U
+        when (hit) {
+          load_prediction.bits := Mux(weak, load_altpred, ctr(2))
+          load_prediction.valid := !weak || load_alt_valid
+        }
+        load_altpred = Mux(hit, ctr(2), load_altpred)
+        load_alt_valid = load_alt_valid || hit
+      }
 
       provided = provided || hit
       provider = Mux(hit, i.U, provider)
       altpred  = Mux(hit, f3_resps(i)(w).bits.ctr(2), altpred)
+    }
+    if (enableSDM) {
+      val valid = s3_valid && s3_mask(w) && load_prediction.valid
+      io.resp.f3(w).load_prediction.valid := valid
+      io.resp.f3(w).load_prediction.bits := valid && load_prediction.bits
     }
     f3_meta.provider(w).valid := provided
     f3_meta.provider(w).bits  := provider

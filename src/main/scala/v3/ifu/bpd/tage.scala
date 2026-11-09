@@ -141,10 +141,11 @@ class TageTable(val nRows: Int, val tagSz: Int, val histLength: Int, val uBitPer
   val wrbypass_tags    = Reg(Vec(nWrBypassEntries, UInt(tagSz.W)))
   val wrbypass_idxs    = Reg(Vec(nWrBypassEntries, UInt(log2Ceil(nRows).W)))
   val wrbypass         = Reg(Vec(nWrBypassEntries, Vec(bankWidth, UInt(3.W))))
+  val wrbypass_valids  = RegInit(VecInit(Seq.fill(nWrBypassEntries)(0.U(bankWidth.W))))
   val wrbypass_enq_idx = RegInit(0.U(log2Ceil(nWrBypassEntries).W))
 
   val wrbypass_hits    = VecInit((0 until nWrBypassEntries) map { i =>
-    !doing_reset &&
+    !doing_reset && wrbypass_valids(i).orR &&
     wrbypass_tags(i) === update_tag &&
     wrbypass_idxs(i) === update_idx
   })
@@ -152,12 +153,13 @@ class TageTable(val nRows: Int, val tagSz: Int, val histLength: Int, val uBitPer
   val wrbypass_hit_idx = PriorityEncoder(wrbypass_hits)
 
   for (w <- 0 until bankWidth) {
+    val bypass_valid = wrbypass_hit && wrbypass_valids(wrbypass_hit_idx)(w)
     update_wdata(w).ctr   := Mux(io.update_alloc(w),
       Mux(io.update_taken(w), 4.U,
                               3.U
       ),
-      Mux(wrbypass_hit,       inc_ctr(wrbypass(wrbypass_hit_idx)(w), io.update_taken(w)),
-                              inc_ctr(io.update_old_ctr(w), io.update_taken(w))
+      Mux(bypass_valid, inc_ctr(wrbypass(wrbypass_hit_idx)(w), io.update_taken(w)),
+                        inc_ctr(io.update_old_ctr(w), io.update_taken(w))
       )
     )
     update_wdata(w).valid := true.B
@@ -167,13 +169,17 @@ class TageTable(val nRows: Int, val tagSz: Int, val histLength: Int, val uBitPer
     update_lo_wdata(w)    := io.update_u(w)(0)
   }
 
-  when (io.update_mask.reduce(_||_)) {
-    when (wrbypass_hits.reduce(_||_)) {
-      wrbypass(wrbypass_hit_idx) := VecInit(update_wdata.map(_.ctr))
+  when (!doing_reset && io.update_mask.asUInt.orR) {
+    when (wrbypass_hit) {
+      for (w <- 0 until bankWidth) {
+        when (io.update_mask(w)) { wrbypass(wrbypass_hit_idx)(w) := update_wdata(w).ctr }
+      }
+      wrbypass_valids(wrbypass_hit_idx) := wrbypass_valids(wrbypass_hit_idx) | io.update_mask.asUInt
     } .otherwise {
       wrbypass     (wrbypass_enq_idx) := VecInit(update_wdata.map(_.ctr))
       wrbypass_tags(wrbypass_enq_idx) := update_tag
       wrbypass_idxs(wrbypass_enq_idx) := update_idx
+      wrbypass_valids(wrbypass_enq_idx) := io.update_mask.asUInt
       wrbypass_enq_idx := WrapInc(wrbypass_enq_idx, nWrBypassEntries)
     }
   }
@@ -236,6 +242,9 @@ class TageBranchPredictorBank(params: BoomTageParams = BoomTageParams())(implici
   val s1_update_meta = s1_update.bits.meta.asTypeOf(new TageMeta)
   val s1_update_mispredict_mask = UIntToOH(s1_update.bits.cfi_idx.bits) &
     Fill(bankWidth, s1_update.bits.cfi_mispredicted)
+  val s1_load_update = enableSDM.B && s1_update.bits.load_idx.valid
+  val s1_load_mispredicted = !s1_update.bits.load_prediction.valid ||
+    s1_update.bits.load_prediction.bits =/= s1_update.bits.load_miss
 
   val s1_update_mask  = WireInit((0.U).asTypeOf(Vec(tageNTables, Vec(bankWidth, Bool()))))
   val s1_update_u_mask  = WireInit((0.U).asTypeOf(Vec(tageNTables, Vec(bankWidth, UInt(1.W)))))
@@ -319,19 +328,23 @@ class TageBranchPredictorBank(params: BoomTageParams = BoomTageParams())(implici
     f3_meta.allocate(w).valid := allocatable_slots =/= 0.U
     f3_meta.allocate(w).bits  := alloc_entry
 
-    val update_was_taken = (s1_update.bits.cfi_idx.valid &&
+    val load_slot = s1_load_update && s1_update.bits.load_idx.bits === w.U
+    val update_was_taken = Mux(load_slot, s1_update.bits.load_miss,
+                            s1_update.bits.cfi_idx.valid &&
                             (s1_update.bits.cfi_idx.bits === w.U) &&
                             s1_update.bits.cfi_taken)
-    when (s1_update.bits.br_mask(w) && s1_update.valid && s1_update.bits.is_commit_update) {
+    val alt_differs = Mux(load_slot,
+      s1_update.bits.load_prediction.valid && s1_update.bits.load_alt_differs,
+      s1_update_meta.alt_differs(w))
+    val mispredicted = Mux(load_slot, s1_load_mispredicted, s1_update_mispredict_mask(w))
+    when (s1_update.valid && (load_slot || (s1_update.bits.br_mask(w) && s1_update.bits.is_commit_update))) {
       when (s1_update_meta.provider(w).valid) {
         val provider = s1_update_meta.provider(w).bits
 
         s1_update_mask(provider)(w) := true.B
         s1_update_u_mask(provider)(w) := true.B
 
-        val new_u = inc_u(s1_update_meta.provider_u(w),
-                          s1_update_meta.alt_differs(w),
-                          s1_update_mispredict_mask(w))
+        val new_u = inc_u(s1_update_meta.provider_u(w), alt_differs, mispredicted)
         s1_update_u      (provider)(w) := new_u
         s1_update_taken  (provider)(w) := update_was_taken
         s1_update_old_ctr(provider)(w) := s1_update_meta.provider_ctr(w)
@@ -340,12 +353,14 @@ class TageBranchPredictorBank(params: BoomTageParams = BoomTageParams())(implici
       }
     }
   }
-  when (s1_update.valid && s1_update.bits.is_commit_update && s1_update.bits.cfi_mispredicted && s1_update.bits.cfi_idx.valid) {
-    val idx = s1_update.bits.cfi_idx.bits
+  val allocate_update = Mux(s1_load_update, s1_load_mispredicted,
+    s1_update.bits.is_commit_update && s1_update.bits.cfi_mispredicted && s1_update.bits.cfi_idx.valid)
+  when (s1_update.valid && allocate_update) {
+    val idx = Mux(s1_load_update, s1_update.bits.load_idx.bits, s1_update.bits.cfi_idx.bits)
     val allocate = s1_update_meta.allocate(idx)
     when (allocate.valid) {
       s1_update_mask (allocate.bits)(idx) := true.B
-      s1_update_taken(allocate.bits)(idx) := s1_update.bits.cfi_taken
+      s1_update_taken(allocate.bits)(idx) := Mux(s1_load_update, s1_update.bits.load_miss, s1_update.bits.cfi_taken)
       s1_update_alloc(allocate.bits)(idx) := true.B
 
       s1_update_u_mask(allocate.bits)(idx) := true.B

@@ -283,10 +283,10 @@ class TageBranchPredictorBank(params: BoomTageParams = BoomTageParams())(implici
         final_altpred       := altpred
       }
       if (enableSDM) {
-        val weak = ctr === 3.U || ctr === 4.U
+        val weak_prediction = ctr === 3.U || ctr === 4.U
         when (hit) {
-          load_prediction.bits := Mux(weak, load_altpred, ctr(2))
-          load_prediction.valid := !weak || load_alt_valid
+          load_prediction.bits := Mux(weak_prediction, load_altpred, ctr(2))
+          load_prediction.valid := !weak_prediction || load_alt_valid
           final_load_altpred := load_altpred
           final_load_alt_valid := load_alt_valid
         }

@@ -509,6 +509,29 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
                              rob.io.com_xcpt.bits.ftq_idx,
                              rob.io.commit.uops(youngest_com_idx).ftq_idx)
 
+  io.ifu.load_feedback := 0.U.asTypeOf(io.ifu.load_feedback)
+  if (enableSDM) {
+    for (w <- 0 until coreWidth) {
+      val uop = rob.io.commit.uops(w)
+      val result = rob.io.commit.load_results(w)
+      io.ifu.load_feedback(w).valid := rob.io.commit.valids(w) && result.valid &&
+        CoroLoadResult.isTracked(uop)
+      io.ifu.load_feedback(w).bits.ftq_idx := uop.ftq_idx
+      io.ifu.load_feedback(w).bits.pc_lob := uop.pc_lob
+      io.ifu.load_feedback(w).bits.miss := result.bits
+    }
+    val miss_flush = rob.io.flush.valid && rob.io.flush.bits.cause === MINI_EXCEPTION_SDM_MISS &&
+      CoroLoadResult.isTracked(rob.io.flush_uop)
+    when (miss_flush) {
+      assert(!rob.io.commit.valids.asUInt.orR, "head-miss feedback must not overlap commit")
+
+      io.ifu.load_feedback(0).valid := true.B
+      io.ifu.load_feedback(0).bits.ftq_idx := rob.io.flush_uop.ftq_idx
+      io.ifu.load_feedback(0).bits.pc_lob := rob.io.flush_uop.pc_lob
+      io.ifu.load_feedback(0).bits.miss := true.B
+    }
+  }
+
   assert(!(rob.io.commit.valids.reduce(_|_) && rob.io.com_xcpt.valid),
     "ROB can't commit and except in same cycle!")
 

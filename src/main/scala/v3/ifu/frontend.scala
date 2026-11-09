@@ -208,6 +208,8 @@ class FetchBundle(implicit p: Parameters) extends BoomBundle
   val saved_tail      = Vec(fetchWidth, Valid(UInt(coroPCBufferPtrBits.W)))
   val last_end        = Valid(UInt(log2Ceil(fetchWidth).W))
   val load_prediction = Vec(fetchWidth, Valid(Bool()))
+  val load_alt_differs = UInt(fetchWidth.W)
+  val prediction_ghist = new GlobalHistory
   val predicted_miss  = Valid(UInt(log2Ceil(fetchWidth).W))
   val prefetch        = Valid(UInt(log2Ceil(fetchWidth).W)) // accepted switch, not just a prediction
   val resume_load     = Valid(UInt(log2Ceil(fetchWidth).W))
@@ -347,6 +349,7 @@ class BoomFrontendIO(implicit p: Parameters) extends BoomBundle
   val stop_fetch = Output(Bool())
 
   val commit = Valid(UInt(ftqSz.W))
+  val load_feedback = Output(Vec(coreWidth, Valid(new CoroLoadFeedback)))
 
   val flush_icache = Output(Bool())
 
@@ -914,6 +917,8 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
   f3_decoded_bundle.ghist    := f3.io.deq.bits.ghist
   f3_decoded_bundle.lhist    := f3_bpd_resp.io.deq.bits.lhist
   f3_decoded_bundle.bpd_meta := f3_bpd_resp.io.deq.bits.meta
+  f3_decoded_bundle.prediction_ghist := f3_bpd_resp.io.deq.bits.ghist
+  f3_decoded_bundle.load_alt_differs := VecInit(f3_bpd_resp.io.deq.bits.preds.map(_.load_alt_differs)).asUInt
   f3_decoded_bundle.resume_load.valid := f3_resume_mask.asUInt.orR
   f3_decoded_bundle.resume_load.bits := PriorityEncoder(f3_resume_mask)
   f3_decoded_bundle.setLoadPredictions(f3_bpd_resp.io.deq.bits.preds)
@@ -1206,6 +1211,8 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
 
   ftq.io.enq.valid          := f4.io.deq.valid && fb.io.enq.ready && !f4_delay
   ftq.io.enq.bits           := f4.io.deq.bits
+  ftq.io.load_feedback      := io.cpu.load_feedback
+  ftq.io.load_update.ready  := true.B
 
   val bpd_update_arbiter = Module(new Arbiter(new BranchPredictionUpdate, 2))
   bpd_update_arbiter.io.in(0).valid := ftq.io.bpdupdate.valid

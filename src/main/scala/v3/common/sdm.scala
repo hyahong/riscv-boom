@@ -65,6 +65,13 @@ object CoroLoadResult
   }
 }
 
+class CoroLoadFeedback(implicit p: Parameters) extends BoomBundle
+{
+  val ftq_idx = UInt(log2Ceil(ftqSz).W)
+  val pc_lob  = UInt(log2Ceil(icBlockBytes).W)
+  val miss    = Bool()
+}
+
 object SDMFrame
 {
   def index(context: SDMContextTag): UInt = {

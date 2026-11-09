@@ -28,6 +28,7 @@ class BranchPrediction(implicit p: Parameters) extends BoomBundle()(p)
 
   // Independent of branch direction/target. In F3, bits=true predicts an L1 load miss
   val load_prediction = Valid(Bool())
+  val load_alt_differs = Bool()
 }
 
 // A branch prediction for a entire fetch-width worth of instructions
@@ -37,9 +38,30 @@ class BranchPredictionBundle(implicit p: Parameters) extends BoomBundle()(p)
   with HasBoomFrontendParameters
 {
   val pc = UInt(vaddrBitsExtended.W)
+  val ghist = new GlobalHistory
   val preds = Vec(fetchWidth, new BranchPrediction)
   val meta = Output(Vec(nBanks, UInt(bpdMaxMetaLength.W)))
   val lhist = Output(Vec(nBanks, UInt(localHistoryLength.W)))
+}
+
+class LoadPredictionSnapshot(implicit p: Parameters) extends BoomBundle
+  with HasBoomFrontendParameters
+{
+  val context = new SDMContextTag
+  val prediction = Vec(fetchWidth, Valid(Bool()))
+  val alt_differs = UInt(fetchWidth.W)
+  val edge_inst = Vec(nBanks, Bool())
+  val ghist = new GlobalHistory
+}
+
+class LoadPredictionUpdate(implicit p: Parameters) extends LoadPredictionSnapshot
+{
+  val ftq_idx = UInt(log2Ceil(ftqSz).W)
+  val pc = UInt(vaddrBitsExtended.W)
+  val mask = UInt(fetchWidth.W)
+  val misses = UInt(fetchWidth.W)
+  val lhist = Vec(nBanks, UInt(localHistoryLength.W))
+  val meta = Vec(nBanks, UInt(bpdMaxMetaLength.W))
 }
 
 
@@ -363,6 +385,14 @@ class BranchPredictor(implicit p: Parameters) extends BoomModule()(p)
   io.resp.f1.pc := RegNext(io.f0_req.bits.pc)
   io.resp.f2.pc := RegNext(io.resp.f1.pc)
   io.resp.f3.pc := RegNext(io.resp.f2.pc)
+  io.resp.f1.ghist := 0.U.asTypeOf(io.resp.f1.ghist)
+  io.resp.f2.ghist := 0.U.asTypeOf(io.resp.f2.ghist)
+  io.resp.f3.ghist := 0.U.asTypeOf(io.resp.f3.ghist)
+  if (enableSDM) {
+    io.resp.f1.ghist := RegNext(io.f0_req.bits.ghist)
+    io.resp.f2.ghist := RegNext(io.resp.f1.ghist)
+    io.resp.f3.ghist := RegNext(io.resp.f2.ghist)
+  }
 
   // We don't care about meta from the f1 and f2 resps
   // Use the meta from the latest resp

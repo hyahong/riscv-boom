@@ -124,6 +124,8 @@ class FetchTargetQueue(implicit p: Parameters) extends BoomModule
     val brupdate = Input(new BrUpdateInfo)
 
     val bpdupdate = Output(Valid(new BranchPredictionUpdate))
+    val load_feedback = Input(Vec(coreWidth, Valid(new CoroLoadFeedback)))
+    val load_update = Decoupled(new LoadPredictionUpdate)
 
     val ras_update = Output(Bool())
     val ras_update_idx = Output(UInt(log2Ceil(nRasEntries).W))
@@ -266,14 +268,80 @@ class FetchTargetQueue(implicit p: Parameters) extends BoomModule
   }
 
 
+  val load_read_ready = WireInit(true.B)
+  val has_load_results = WireInit(false.B)
   val do_commit_update     = (!bpd_update_mispredict &&
                               !bpd_update_repair &&
                                bpd_ptr =/= deq_ptr &&
                                enq_ptr =/= WrapInc(bpd_ptr, num_entries) &&
                               !io.brupdate.b2.mispredict &&
-                              !io.redirect.valid && !RegNext(io.redirect.valid))
+                              !io.redirect.valid && !RegNext(io.redirect.valid) &&
+                              (!has_load_results || load_read_ready))
   val do_mispredict_update = bpd_update_mispredict
   val do_repair_update     = bpd_update_repair
+
+  io.load_update.valid := false.B
+  io.load_update.bits := 0.U.asTypeOf(io.load_update.bits)
+  if (enableSDM) {
+    val load_results = RegInit(VecInit(Seq.fill(num_entries) {
+      0.U.asTypeOf(Vec(fetchWidth, Valid(Bool())))
+    }))
+    val observed = WireInit(load_results)
+    for (feedback <- io.load_feedback) {
+      val idx = feedback.bits.ftq_idx
+      val slot = Wire(UInt(log2Ceil(fetchWidth).W))
+      slot := (feedback.bits.pc_lob ^
+        Mux(ram(idx).start_bank === 1.U, 1.U << log2Ceil(bankBytes), 0.U))(log2Ceil(fetchWidth), 1)
+      when (feedback.valid) {
+        assert(!(do_enq && idx === enq_ptr), "load feedback must precede FTQ reuse")
+
+        for (row <- 0 until num_entries) {
+          when (idx === row.U) {
+            assert(!load_results(row)(slot).valid, "duplicate load feedback for an FTQ slot")
+
+            observed(row)(slot).valid := true.B
+            observed(row)(slot).bits := feedback.bits.miss
+          }
+        }
+      }
+    }
+    has_load_results := observed(bpd_ptr).map(_.valid).reduce(_ || _)
+
+    val snapshot = SyncReadMem(num_entries, new LoadPredictionSnapshot)
+    val enq_snapshot = Wire(new LoadPredictionSnapshot)
+    enq_snapshot.context := io.enq.bits.context
+    enq_snapshot.prediction := io.enq.bits.load_prediction
+    enq_snapshot.alt_differs := io.enq.bits.load_alt_differs
+    enq_snapshot.edge_inst := io.enq.bits.edge_inst
+    enq_snapshot.ghist := io.enq.bits.prediction_ghist
+    when (do_enq) { snapshot.write(enq_ptr, enq_snapshot) }
+
+    val read_load = do_commit_update && has_load_results
+    val read_pending = RegNext(read_load, false.B)
+    val read_snapshot = snapshot.read(bpd_idx, read_load)
+    val updates = Module(new Queue(new LoadPredictionUpdate, 2, pipe = true))
+
+    load_read_ready := (updates.io.count +& read_pending.asUInt) < 2.U || updates.io.deq.fire
+    updates.io.enq.valid := read_pending
+    updates.io.enq.bits.context := read_snapshot.context
+    updates.io.enq.bits.prediction := read_snapshot.prediction
+    updates.io.enq.bits.alt_differs := read_snapshot.alt_differs
+    updates.io.enq.bits.edge_inst := read_snapshot.edge_inst
+    updates.io.enq.bits.ghist := read_snapshot.ghist
+    updates.io.enq.bits.ftq_idx := RegEnable(bpd_idx, read_load)
+    updates.io.enq.bits.pc := bpd_pc
+    updates.io.enq.bits.mask := RegEnable(VecInit(observed(bpd_ptr).map(_.valid)).asUInt, read_load)
+    updates.io.enq.bits.misses := RegEnable(VecInit(observed(bpd_ptr).map(r => r.valid && r.bits)).asUInt, read_load)
+    updates.io.enq.bits.lhist := bpd_lhist
+    updates.io.enq.bits.meta := bpd_meta
+    io.load_update <> updates.io.deq
+
+    assert(!updates.io.enq.valid || updates.io.enq.ready, "load metadata snapshot overflow")
+
+    load_results := observed
+    when (do_commit_update) { load_results(bpd_ptr) := 0.U.asTypeOf(load_results(bpd_ptr)) }
+    when (do_enq) { load_results(enq_ptr) := 0.U.asTypeOf(load_results(enq_ptr)) }
+  }
 
   when (RegNext(do_commit_update || do_repair_update || do_mispredict_update)) {
     val cfi_idx = bpd_entry.cfi_idx.bits

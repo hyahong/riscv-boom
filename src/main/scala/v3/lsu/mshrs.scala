@@ -32,6 +32,52 @@ class BoomDCacheReqInternal(implicit p: Parameters) extends BoomDCacheReq()(p)
   val sdq_id    = UInt(log2Ceil(cfg.nSDQ).W)
 }
 
+class BoomMSHRQueue(entries: Int, receiveL2Results: Boolean)(implicit p: Parameters)
+  extends BranchKillableQueue(new BoomDCacheReqInternal, entries, u => u.uses_ldq, false)
+{
+  val observation = Option.when(receiveL2Results) { IO(new Bundle {
+    val l2_result = Input(Valid(Bool()))
+    val needs_l2 = Input(Bool())
+    val result = Decoupled(new CoroLoadResult)
+    val empty = Output(Bool())
+  }) }
+
+  observation.foreach { obs =>
+    val read_ptr = Counter(entries)
+    val maybe_full = RegInit(false.B)
+    val ptr_match = enq_ptr.value === read_ptr.value
+    val empty = ptr_match && !maybe_full
+    val tracked = RegInit(VecInit(Seq.fill(entries)(false.B)))
+    val needs_l2 = Reg(Vec(entries, Bool()))
+
+    io.enq.ready := !full && !(ptr_match && maybe_full)
+    obs.empty := empty
+    val uop = uops(read_ptr.value)
+    val live = tracked(read_ptr.value) && !IsKilledByBranch(io.brupdate, uop) && !io.flush
+    obs.result.valid := !empty && live && (!needs_l2(read_ptr.value) || obs.l2_result.valid)
+    obs.result.bits.uop := uop
+    obs.result.bits.uop.br_mask := GetNewBrMask(io.brupdate, uop)
+    obs.result.bits.miss := needs_l2(read_ptr.value) && obs.l2_result.bits
+
+    val consume = !empty && (!live || obs.result.fire)
+    when (consume) {
+      tracked(read_ptr.value) := false.B
+      read_ptr.inc()
+    }
+    when (do_enq =/= consume) { maybe_full := do_enq }
+    for (i <- 0 until entries) {
+      when (tracked(i)) {
+        uops(i).br_mask := GetNewBrMask(io.brupdate, uops(i))
+        when (IsKilledByBranch(io.brupdate, uops(i)) || io.flush) { tracked(i) := false.B }
+      }
+    }
+    when (do_enq) {
+      tracked(enq_ptr.value) := !io.enq.bits.is_hella && CoroLoadResult.isTracked(io.enq.bits.uop) &&
+        !IsKilledByBranch(io.brupdate, io.enq.bits.uop) && !io.flush
+      needs_l2(enq_ptr.value) := obs.needs_l2
+    }
+  }
+}
 
 class BoomMSHR(receiveL2Results: Boolean)(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
   with HasL1HellaCacheParameters
@@ -39,6 +85,7 @@ class BoomMSHR(receiveL2Results: Boolean)(implicit edge: TLEdgeOut, p: Parameter
   val io = IO(new Bundle {
     val id = Input(UInt())
     val l2_result = Option.when(receiveL2Results) { Flipped(Decoupled(Bool())) }
+    val load_result = Option.when(receiveL2Results) { Decoupled(new CoroLoadResult) }
 
     val req_pri_val = Input(Bool())
     val req_pri_rdy = Output(Bool())
@@ -151,7 +198,7 @@ class BoomMSHR(receiveL2Results: Boolean)(implicit edge: TLEdgeOut, p: Parameter
   val sec_rdy = (!cmd_requires_second_acquire && !io.req_is_probe &&
                  !state.isOneOf(s_invalid, s_meta_write_req, s_mem_finish_1, s_mem_finish_2))// Always accept secondary misses
 
-  val rpq = Module(new BranchKillableQueue(new BoomDCacheReqInternal, cfg.nRPQ, u => u.uses_ldq, false))
+  val rpq = Module(new BoomMSHRQueue(cfg.nRPQ, receiveL2Results))
   rpq.io.brupdate := io.brupdate
   rpq.io.flush  := io.exception
   assert(!(state === s_invalid && !rpq.io.empty))
@@ -160,6 +207,54 @@ class BoomMSHR(receiveL2Results: Boolean)(implicit edge: TLEdgeOut, p: Parameter
   rpq.io.enq.bits  := io.req
   rpq.io.deq.ready := false.B
 
+  val request_ready = WireInit(rpq.io.enq.ready)
+  val observations_empty = WireInit(true.B)
+  if (receiveL2Results) {
+    val primary = io.req_pri_val && io.req_pri_rdy
+    val accepted = primary || (io.req_sec_val && io.req_sec_rdy)
+    val primary_needs_l2 = !io.req.tag_match || !io.req.old_meta.coh.onAccess(io.req.uop.mem_cmd)._1
+    val local = (!state.isOneOf(s_refill_req, s_refill_resp) && new_coh.onAccess(io.req.uop.mem_cmd)._1) ||
+      (state === s_refill_resp && refill_done && coh_on_grant.onAccess(io.req.uop.mem_cmd)._1)
+    val needs_l2 = Mux(primary, primary_needs_l2, !local)
+    val obs = rpq.observation.get
+    obs.l2_result := l2_result.get
+    obs.needs_l2 := needs_l2
+
+    val pf_valid = RegInit(false.B)
+    val pf_uop = Reg(new MicroOp)
+    val pf_needs_l2 = Reg(Bool())
+    val is_sdm_prefetch = !io.req.is_hella && io.req.uop.is_sdm_prefetch && io.req.uop.sdm.context.is_coro
+    request_ready := rpq.io.enq.ready && !(is_sdm_prefetch && pf_valid)
+    observations_empty := obs.empty && !pf_valid
+    when (state.isOneOf(s_invalid, s_prefetch)) {
+      assert(!l2_result_pending && observations_empty, "MSHR reused with outstanding load observations")
+    }
+
+    val results = Module(new RRArbiter(new CoroLoadResult, 2))
+    results.io.in(0) <> obs.result
+    results.io.in(1).valid := pf_valid && !IsKilledByBranch(io.brupdate, pf_uop) && !io.exception &&
+      (!pf_needs_l2 || l2_result.get.valid)
+    results.io.in(1).bits.uop := pf_uop
+    results.io.in(1).bits.uop.br_mask := GetNewBrMask(io.brupdate, pf_uop)
+    results.io.in(1).bits.miss := pf_needs_l2 && l2_result.get.bits
+    io.load_result.get <> results.io.out
+
+    when (pf_valid) {
+      pf_uop.br_mask := GetNewBrMask(io.brupdate, pf_uop)
+      when (IsKilledByBranch(io.brupdate, pf_uop) || io.exception || results.io.in(1).fire) {
+        pf_valid := false.B
+      }
+    }
+    when (accepted && is_sdm_prefetch) {
+      pf_valid := !IsKilledByBranch(io.brupdate, io.req.uop) && !io.exception
+      pf_uop := io.req.uop
+      pf_uop.br_mask := GetNewBrMask(io.brupdate, io.req.uop)
+      pf_needs_l2 := needs_l2
+    }
+    when (accepted && !primary && state === s_prefetch && !local) {
+      l2_result.get.valid := false.B
+    }
+  }
 
   val grantack = Reg(Valid(new TLBundleE(edge.bundle)))
   val refill_ctr  = Reg(UInt(log2Ceil(cacheDataBeats).W))
@@ -182,7 +277,7 @@ class BoomMSHR(receiveL2Results: Boolean)(implicit edge: TLEdgeOut, p: Parameter
   io.meta_write.valid    := false.B
   io.meta_write.bits     := DontCare
   io.req_pri_rdy         := false.B
-  io.req_sec_rdy         := sec_rdy && rpq.io.enq.ready
+  io.req_sec_rdy         := sec_rdy && request_ready
   io.mem_acquire.valid   := false.B
   io.mem_acquire.bits    := DontCare
   io.refill.valid        := false.B
@@ -240,7 +335,7 @@ class BoomMSHR(receiveL2Results: Boolean)(implicit edge: TLEdgeOut, p: Parameter
   }
 
   when (state === s_invalid) {
-    io.req_pri_rdy := true.B
+    io.req_pri_rdy := request_ready
     grant_had_data := false.B
 
     when (io.req_pri_val && io.req_pri_rdy) {
@@ -407,11 +502,11 @@ class BoomMSHR(receiveL2Results: Boolean)(implicit edge: TLEdgeOut, p: Parameter
       next_state := s_mem_finish_2
     }
   } .elsewhen (state === s_mem_finish_2) {
-    when (!l2_result_pending) {
+    when (!l2_result_pending && observations_empty) {
       next_state := Mux(finish_to_prefetch, s_prefetch, s_invalid)
     }
   } .elsewhen (state === s_prefetch) {
-    io.req_pri_rdy := true.B
+    io.req_pri_rdy := request_ready
     when ((io.req_sec_val && !io.req_sec_rdy) || io.clear_prefetch) {
       next_state := s_invalid
     } .elsewhen (io.req_sec_val && io.req_sec_rdy) {
@@ -559,6 +654,7 @@ class BoomMSHRFile(receiveL2Results: Boolean)(implicit edge: TLEdgeOut, p: Param
     val l2_result = Option.when(receiveL2Results) {
       Flipped(Decoupled(new CacheAccessResult(math.max(1, log2Ceil(cfg.nMSHRs)))))
     }
+    val load_result = Option.when(receiveL2Results) { Decoupled(new CoroLoadResult) }
 
     val brupdate       = Input(new BrUpdateInfo)
     val exception    = Input(Bool())
@@ -752,6 +848,11 @@ class BoomMSHRFile(receiveL2Results: Boolean)(implicit edge: TLEdgeOut, p: Param
       mshr.io.l2_result.get.bits := result.bits.miss
     }
     when (result.valid) { assert(result.bits.source < cfg.nMSHRs.U, "L2 result source is not an L1 MSHR") }
+  }
+  io.load_result.foreach { result =>
+    val arb = Module(new RRArbiter(new CoroLoadResult, cfg.nMSHRs))
+    mshrs.zipWithIndex.foreach { case (mshr, i) => arb.io.in(i) <> mshr.io.load_result.get }
+    result <> arb.io.out
   }
 
   val mshr_head      = RegInit(0.U(log2Ceil(cfg.nMSHRs).W))

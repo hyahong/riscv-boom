@@ -6,7 +6,7 @@
 package boom.v3.common
 
 import chisel3._
-import chisel3.util.{RRArbiter, Queue}
+import chisel3.util.{RRArbiter, Queue, DecoupledIO}
 
 import scala.collection.mutable.{ListBuffer}
 
@@ -130,6 +130,11 @@ class BoomTile private(
 
   // DCache
   lazy val dcache: BoomNonBlockingDCache = LazyModule(new BoomNonBlockingDCache(tileId, boomParams.core.enableSDM))
+  val l2ResultNode = Option.when(boomParams.core.enableSDM) {
+    val node = BundleBridgeIdentityNode[DecoupledIO[CacheAccessResult]]()
+    dcache.l2ResultNode.get := node
+    node
+  }
   val dCacheTap = TLIdentityNode()
   tlMasterXbar.node := dCacheTap := TLWidthWidget(tileParams.dcache.get.rowBits/8) := visibilityNode := dcache.node
 

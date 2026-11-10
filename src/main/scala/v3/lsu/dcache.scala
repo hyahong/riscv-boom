@@ -437,6 +437,8 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   outer.l2ResultNode.foreach { node =>
     mshrs.io.l2_result.get <> node.bundle
   }
+
+  mshrs.io.load_result.foreach(_.ready := true.B)
   mshrs.io.keep_refill  := io.lsu.keep_refill
   mshrs.io.clear_all    := io.lsu.force_order
   mshrs.io.brupdate     := io.lsu.brupdate

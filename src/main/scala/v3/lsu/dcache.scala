@@ -378,7 +378,7 @@ class BoomBankedDataArray(implicit p: Parameters) extends AbstractBoomDataArray 
  *
  * @param hartid hardware thread for the cache
  */
-class BoomNonBlockingDCache(staticIdForMetadataUseOnly: Int)(implicit p: Parameters) extends LazyModule
+class BoomNonBlockingDCache(staticIdForMetadataUseOnly: Int, val receiveL2Results: Boolean = false)(implicit p: Parameters) extends LazyModule
 {
   private val tileParams = p(TileKey)
   protected val cfg = tileParams.dcache.get
@@ -397,6 +397,9 @@ class BoomNonBlockingDCache(staticIdForMetadataUseOnly: Int)(implicit p: Paramet
     cacheClientParameters ++ mmioClientParameters,
     minLatency = 1)))
 
+  val l2ResultNode = Option.when(receiveL2Results) {
+    BundleBridgeSink[DecoupledIO[CacheAccessResult]]()
+  }
 
   lazy val module = new BoomNonBlockingDCacheModule(this)
 
@@ -430,7 +433,10 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
 
   val wb = Module(new BoomWritebackUnit)
   val prober = Module(new BoomProbeUnit)
-  val mshrs = Module(new BoomMSHRFile)
+  val mshrs = Module(new BoomMSHRFile(outer.receiveL2Results))
+  outer.l2ResultNode.foreach { node =>
+    mshrs.io.l2_result.get <> node.bundle
+  }
   mshrs.io.keep_refill  := io.lsu.keep_refill
   mshrs.io.clear_all    := io.lsu.force_order
   mshrs.io.brupdate     := io.lsu.brupdate

@@ -33,11 +33,12 @@ class BoomDCacheReqInternal(implicit p: Parameters) extends BoomDCacheReq()(p)
 }
 
 
-class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
+class BoomMSHR(receiveL2Results: Boolean)(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
   with HasL1HellaCacheParameters
 {
   val io = IO(new Bundle {
     val id = Input(UInt())
+    val l2_result = Option.when(receiveL2Results) { Flipped(Decoupled(Bool())) }
 
     val req_pri_val = Input(Bool())
     val req_pri_rdy = Output(Bool())
@@ -110,6 +111,26 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
   val next_state = WireInit(state)
   state := next_state
   io.req_pri_rdy_next := next_state.isOneOf(s_invalid, s_prefetch)
+
+  // Raw L2 notification lifetime is independent of branch/ROB squash. Consume it
+  // even if every original uop was killed, before this source can be reused.
+  val l2_result_pending = if (receiveL2Results) RegInit(false.B) else false.B
+  val l2_result = if (receiveL2Results) Some(RegInit(0.U.asTypeOf(Valid(Bool())))) else None
+  io.l2_result.foreach { result =>
+    result.ready := l2_result_pending
+    when (io.mem_acquire.fire) {
+      assert(!l2_result_pending, "L1 source reused before its L2 result arrived")
+      l2_result_pending := true.B
+      l2_result.get.valid := false.B
+    }
+    when (result.valid) { assert(l2_result_pending, "unexpected or duplicate L2 result") }
+    when (result.fire) {
+      l2_result_pending := false.B
+      l2_result.get.valid := true.B
+      l2_result.get.bits := result.bits
+    }
+    when (io.req_pri_val && io.req_pri_rdy) { l2_result.get.valid := false.B }
+  }
 
   val req     = Reg(new BoomDCacheReqInternal)
   val req_idx = req.addr(untagBits-1, blockOffBits)
@@ -386,7 +407,9 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
       next_state := s_mem_finish_2
     }
   } .elsewhen (state === s_mem_finish_2) {
-    next_state := Mux(finish_to_prefetch, s_prefetch, s_invalid)
+    when (!l2_result_pending) {
+      next_state := Mux(finish_to_prefetch, s_prefetch, s_invalid)
+    }
   } .elsewhen (state === s_prefetch) {
     io.req_pri_rdy := true.B
     when ((io.req_sec_val && !io.req_sec_rdy) || io.clear_prefetch) {
@@ -522,7 +545,7 @@ class LineBufferMeta(implicit p: Parameters) extends BoomBundle()(p)
   val addr = UInt(coreMaxAddrBits.W)
 }
 
-class BoomMSHRFile(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
+class BoomMSHRFile(receiveL2Results: Boolean)(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
   with HasL1HellaCacheParameters
 {
   val io = IO(new Bundle {
@@ -533,6 +556,9 @@ class BoomMSHRFile(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()
     val block_hit = Output(Vec(memWidth, Bool()))
     val miss_ack = Output(Vec(memWidth, Valid(new MicroOp)))
     val keep_refill = Input(Valid(UInt(corePAddrBits.W)))
+    val l2_result = Option.when(receiveL2Results) {
+      Flipped(Decoupled(new CacheAccessResult(math.max(1, log2Ceil(cfg.nMSHRs)))))
+    }
 
     val brupdate       = Input(new BrUpdateInfo)
     val exception    = Input(Bool())
@@ -643,7 +669,7 @@ class BoomMSHRFile(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()
   val pri_rdy = WireInit(false.B)
   val pri_val = req.valid && sdq_rdy && cacheable && !idx_match(req_idx)
   val mshrs = (0 until cfg.nMSHRs) map { i =>
-    val mshr = Module(new BoomMSHR)
+    val mshr = Module(new BoomMSHR(receiveL2Results))
     mshr.io.id := i.U(log2Ceil(cfg.nMSHRs).W)
 
     for (w <- 0 until memWidth) {
@@ -716,6 +742,16 @@ class BoomMSHRFile(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()
     }
 
     mshr
+  }
+
+  io.l2_result.foreach { result =>
+    val selected = (0 until cfg.nMSHRs).map(i => result.bits.source === i.U)
+    result.ready := Mux1H(selected, mshrs.map(_.io.l2_result.get.ready))
+    mshrs.zipWithIndex.foreach { case (mshr, i) =>
+      mshr.io.l2_result.get.valid := result.valid && selected(i)
+      mshr.io.l2_result.get.bits := result.bits.miss
+    }
+    when (result.valid) { assert(result.bits.source < cfg.nMSHRs.U, "L2 result source is not an L1 MSHR") }
   }
 
   val mshr_head      = RegInit(0.U(log2Ceil(cfg.nMSHRs).W))

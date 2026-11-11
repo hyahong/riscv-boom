@@ -86,6 +86,7 @@ class BoomMSHR(receiveL2Results: Boolean)(implicit edge: TLEdgeOut, p: Parameter
     val id = Input(UInt())
     val l2_result = Option.when(receiveL2Results) { Flipped(Decoupled(Bool())) }
     val load_result = Option.when(receiveL2Results) { Decoupled(new CoroLoadResult) }
+    val prefetch_done = Option.when(receiveL2Results) { Decoupled(new MicroOp) }
 
     val req_pri_val = Input(Bool())
     val req_pri_rdy = Output(Bool())
@@ -223,6 +224,7 @@ class BoomMSHR(receiveL2Results: Boolean)(implicit edge: TLEdgeOut, p: Parameter
     val pf_valid = RegInit(false.B)
     val pf_uop = Reg(new MicroOp)
     val pf_needs_l2 = Reg(Bool())
+    val pf_result_sent = RegInit(false.B)
     val is_sdm_prefetch = !io.req.is_hella && io.req.uop.is_sdm_prefetch && io.req.uop.sdm.context.is_coro
     request_ready := rpq.io.enq.ready && !(is_sdm_prefetch && pf_valid)
     observations_empty := obs.empty && !pf_valid
@@ -232,16 +234,24 @@ class BoomMSHR(receiveL2Results: Boolean)(implicit edge: TLEdgeOut, p: Parameter
 
     val results = Module(new RRArbiter(new CoroLoadResult, 2))
     results.io.in(0) <> obs.result
-    results.io.in(1).valid := pf_valid && !IsKilledByBranch(io.brupdate, pf_uop) && !io.exception &&
+    val pf_live = pf_valid && !IsKilledByBranch(io.brupdate, pf_uop) && !io.exception
+    results.io.in(1).valid := pf_live && !pf_result_sent &&
       (!pf_needs_l2 || l2_result.get.valid)
     results.io.in(1).bits.uop := pf_uop
     results.io.in(1).bits.uop.br_mask := GetNewBrMask(io.brupdate, pf_uop)
     results.io.in(1).bits.miss := pf_needs_l2 && l2_result.get.bits
     io.load_result.get <> results.io.out
 
+    io.prefetch_done.get.valid := pf_live && pf_result_sent
+    io.prefetch_done.get.bits := pf_uop
+    io.prefetch_done.get.bits.br_mask := GetNewBrMask(io.brupdate, pf_uop)
+    when (results.io.in(1).fire) {
+      pf_result_sent := true.B
+    }
+
     when (pf_valid) {
       pf_uop.br_mask := GetNewBrMask(io.brupdate, pf_uop)
-      when (IsKilledByBranch(io.brupdate, pf_uop) || io.exception || results.io.in(1).fire) {
+      when (IsKilledByBranch(io.brupdate, pf_uop) || io.exception || io.prefetch_done.get.fire) {
         pf_valid := false.B
       }
     }
@@ -250,6 +260,7 @@ class BoomMSHR(receiveL2Results: Boolean)(implicit edge: TLEdgeOut, p: Parameter
       pf_uop := io.req.uop
       pf_uop.br_mask := GetNewBrMask(io.brupdate, io.req.uop)
       pf_needs_l2 := needs_l2
+      pf_result_sent := false.B
     }
     when (accepted && !primary && state === s_prefetch && !local) {
       l2_result.get.valid := false.B
@@ -655,6 +666,7 @@ class BoomMSHRFile(receiveL2Results: Boolean)(implicit edge: TLEdgeOut, p: Param
       Flipped(Decoupled(new CacheAccessResult(math.max(1, log2Ceil(cfg.nMSHRs)))))
     }
     val load_result = Option.when(receiveL2Results) { Decoupled(new CoroLoadResult) }
+    val prefetch_done = Option.when(receiveL2Results) { Decoupled(new MicroOp) }
 
     val brupdate       = Input(new BrUpdateInfo)
     val exception    = Input(Bool())
@@ -853,6 +865,11 @@ class BoomMSHRFile(receiveL2Results: Boolean)(implicit edge: TLEdgeOut, p: Param
     val arb = Module(new RRArbiter(new CoroLoadResult, cfg.nMSHRs))
     mshrs.zipWithIndex.foreach { case (mshr, i) => arb.io.in(i) <> mshr.io.load_result.get }
     result <> arb.io.out
+  }
+  io.prefetch_done.foreach { done =>
+    val arb = Module(new RRArbiter(new MicroOp, cfg.nMSHRs))
+    mshrs.zipWithIndex.foreach { case (mshr, i) => arb.io.in(i) <> mshr.io.prefetch_done.get }
+    done <> arb.io.out
   }
 
   val mshr_head      = RegInit(0.U(log2Ceil(cfg.nMSHRs).W))

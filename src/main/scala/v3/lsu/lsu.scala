@@ -90,6 +90,8 @@ class LSUDMemIO(implicit p: Parameters, edge: TLEdgeOut) extends BoomBundle()(p)
   // cacheable load accepted by MSHR in DCache S2 (allocation or merge)
   val miss_ack    = Flipped(Vec(memWidth, Valid(new MicroOp)))
   val load_result = Flipped(Vec(memWidth, Valid(new CoroLoadResult)))
+  // SDM prefetch completion, after its result was delivered or the request was dropped
+  val prefetch_done = Flipped(Decoupled(new MicroOp))
   // line selected by a confirmed SDM head-miss flush
   val keep_refill = Output(Valid(UInt(corePAddrBits.W)))
 
@@ -978,6 +980,7 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
 
   val fired_load_incoming  = widthMap(w => RegNext(will_fire_load_incoming(w) && !exe_req_killed(w)))
   val fired_prefetchr_incoming = widthMap(w => RegNext(will_fire_prefetchr_incoming(w) && !exe_req_killed(w)))
+  val mem_prefetch_accepted = widthMap(w => RegNext(will_fire_prefetchr_incoming(w) && dmem_req_fire(w), false.B))
   val fired_stad_incoming  = widthMap(w => RegNext(will_fire_stad_incoming(w) && !exe_req_killed(w)))
   val fired_sta_incoming   = widthMap(w => RegNext(will_fire_sta_incoming (w) && !exe_req_killed(w)))
   val fired_std_incoming   = widthMap(w => RegNext(will_fire_std_incoming (w) && !exe_req_killed(w)))
@@ -1016,6 +1019,8 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
   val clr_bsy_valid   = RegInit(widthMap(w => false.B))
   val clr_bsy_rob_idx = Reg(Vec(memWidth, UInt(robAddrSz.W)))
   val clr_bsy_brmask  = Reg(Vec(memWidth, UInt(maxBrCount.W)))
+  val clr_bsy_blocked = io.core.exception || RegNext(io.core.exception, false.B) ||
+    RegNext(RegNext(io.core.exception, false.B), false.B)
 
   for (w <- 0 until memWidth) {
     clr_bsy_valid   (w) := false.B
@@ -1030,7 +1035,8 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       clr_bsy_rob_idx (w) := mem_stq_incoming_e(w).bits.uop.rob_idx
       clr_bsy_brmask  (w) := GetNewBrMask(io.core.brupdate, mem_stq_incoming_e(w).bits.uop)
     } .elsewhen (fired_prefetchr_incoming(w)) {
-      clr_bsy_valid   (w) := !IsKilledByBranch(io.core.brupdate, mem_incoming_uop(w))
+      clr_bsy_valid   (w) := !IsKilledByBranch(io.core.brupdate, mem_incoming_uop(w)) &&
+        !(enableSDM.B && mem_incoming_uop(w).is_sdm_prefetch && mem_prefetch_accepted(w))
       clr_bsy_rob_idx (w) := mem_incoming_uop(w).rob_idx
       clr_bsy_brmask  (w) := GetNewBrMask(io.core.brupdate, mem_incoming_uop(w))
     } .elsewhen (fired_sta_incoming(w)) {
@@ -1065,8 +1071,26 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
 
     io.core.clr_bsy(w).valid := clr_bsy_valid(w) &&
                                !IsKilledByBranch(io.core.brupdate, clr_bsy_brmask(w)) &&
-                               !io.core.exception && !RegNext(io.core.exception) && !RegNext(RegNext(io.core.exception))
+                               !clr_bsy_blocked
     io.core.clr_bsy(w).bits  := clr_bsy_rob_idx(w)
+  }
+
+  io.dmem.prefetch_done.ready := true.B
+  if (enableSDM) {
+    val done = io.dmem.prefetch_done
+    val killed = io.core.exception || IsKilledByBranch(io.core.brupdate, done.bits)
+    val free_lanes = ~clr_bsy_valid.asUInt
+    val selected = PriorityEncoderOH(free_lanes)
+    done.ready := killed || (free_lanes.orR && !clr_bsy_blocked)
+    for (w <- 0 until memWidth) {
+      when (selected(w) && done.valid && !killed && !clr_bsy_blocked) {
+        io.core.clr_bsy(w).valid := true.B
+        io.core.clr_bsy(w).bits := done.bits.rob_idx
+      }
+    }
+    when (done.valid) {
+      assert(done.bits.is_sdm_prefetch, "only SDM prefetch uses prefetch_done")
+    }
   }
 
   val stdf_clr_bsy_valid   = RegInit(false.B)

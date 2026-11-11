@@ -486,9 +486,10 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   // ------------
   // New requests
 
-  io.lsu.req.ready := metaReadArb.io.in(4).ready && dataReadArb.io.in(2).ready
-  metaReadArb.io.in(4).valid := io.lsu.req.valid
-  dataReadArb.io.in(2).valid := io.lsu.req.valid
+  val prefetch_slots_ready = WireInit(true.B)
+  io.lsu.req.ready := metaReadArb.io.in(4).ready && dataReadArb.io.in(2).ready && prefetch_slots_ready
+  metaReadArb.io.in(4).valid := io.lsu.req.valid && prefetch_slots_ready
+  dataReadArb.io.in(2).valid := io.lsu.req.valid && prefetch_slots_ready
   for (w <- 0 until memWidth) {
     // Tag read for new requests
     metaReadArb.io.in(4).bits.req(w).idx    := io.lsu.req.bits(w).bits.addr >> blockOffBits
@@ -756,6 +757,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   s2_store_failed := s2_valid(0) && s2_nack(0) && s2_send_nack(0) && s2_req(0).uop.uses_stq
 
   // Miss handling
+  val s2_cacheable = widthMap(w => edge.manager.supportsAcquireBFast(s2_req(w).addr, lgCacheBlockBytes.U))
   for (w <- 0 until memWidth) {
     mshrs.io.req(w).valid := s2_valid(w)          &&
                             !s2_hit(w)            &&
@@ -766,6 +768,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
                              s2_type.isOneOf(t_lsu, t_prefetch)             &&
                             !IsKilledByBranch(io.lsu.brupdate, s2_req(w).uop) &&
                             !killedByException(s2_req(w).uop) &&
+                            !(enableSDM.B && s2_req(w).uop.is_sdm_prefetch && !s2_cacheable(w)) &&
                              (isPrefetch(s2_req(w).uop.mem_cmd) ||
                               isRead(s2_req(w).uop.mem_cmd)     ||
                               isWrite(s2_req(w).uop.mem_cmd))
@@ -792,8 +795,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
         !io.lsu.exception && !IsKilledByBranch(io.lsu.brupdate, s0_req(w).uop), false.B)
       val s2_observe = RegNext(s1_observe && !io.lsu.s1_kill(w) &&
         !io.lsu.exception && !IsKilledByBranch(io.lsu.brupdate, s1_req(w).uop), false.B)
-      val cacheable = edge.manager.supportsAcquireBFast(s2_req(w).addr, lgCacheBlockBytes.U)
-      hit_results(w).valid := s2_observe && s2_valid(w) && cacheable &&
+      hit_results(w).valid := s2_observe && s2_valid(w) && s2_cacheable(w) &&
         !s2_nack(w) && s2_hit(w) &&
         !io.lsu.exception && !IsKilledByBranch(io.lsu.brupdate, s2_req(w).uop)
       hit_results(w).bits.uop := s2_req(w).uop
@@ -815,6 +817,53 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
     }
   } else {
     mshrs.io.load_result.foreach(_.ready := true.B)
+  }
+
+  io.lsu.prefetch_done.valid := false.B
+  io.lsu.prefetch_done.bits := 0.U.asTypeOf(new MicroOp)
+  mshrs.io.prefetch_done.foreach(_.ready := true.B)
+  if (enableSDM) {
+    val pf_valid = RegInit(VecInit(Seq.fill(memWidth)(false.B)))
+    val pf_done = RegInit(VecInit(Seq.fill(memWidth)(false.B)))
+    val pf_uop = Reg(Vec(memWidth, new MicroOp))
+    val completion = Module(new RRArbiter(new MicroOp, memWidth + (if (outer.receiveL2Results) 1 else 0)))
+    io.lsu.prefetch_done <> completion.io.out
+    prefetch_slots_ready := (0 until memWidth).map { w =>
+      !io.lsu.req.bits(w).valid || io.lsu.req.bits(w).bits.is_hella ||
+        !io.lsu.req.bits(w).bits.uop.is_sdm_prefetch || !pf_valid(w)
+    }.reduce(_ && _)
+
+    for (w <- 0 until memWidth) {
+      val killed = io.lsu.exception || IsKilledByBranch(io.lsu.brupdate, pf_uop(w))
+      completion.io.in(w).valid := pf_valid(w) && pf_done(w) && !killed
+      completion.io.in(w).bits := pf_uop(w)
+      completion.io.in(w).bits.br_mask := GetNewBrMask(io.lsu.brupdate, pf_uop(w))
+      when (pf_valid(w)) {
+        pf_uop(w).br_mask := GetNewBrMask(io.lsu.brupdate, pf_uop(w))
+        when (killed || completion.io.in(w).fire) { pf_valid(w) := false.B }
+      }
+      when (s1_valid(w) && s1_type === t_lsu && !s1_req(w).is_hella &&
+        s1_req(w).uop.is_sdm_prefetch && io.lsu.s1_kill(w)) {
+        pf_done(w) := true.B
+      }
+      when (s2_valid(w) && s2_type === t_lsu && !s2_req(w).is_hella && s2_req(w).uop.is_sdm_prefetch) {
+        when (outer.receiveL2Results.B && mshrs.io.req(w).fire) {
+          pf_valid(w) := false.B
+        } .otherwise {
+          pf_done(w) := true.B
+        }
+      }
+      when (io.lsu.req.fire && io.lsu.req.bits(w).valid && !io.lsu.req.bits(w).bits.is_hella &&
+        io.lsu.req.bits(w).bits.uop.is_sdm_prefetch) {
+        assert(!pf_valid(w), "accepted SDM PF without a completion record")
+
+        pf_valid(w) := !io.lsu.exception && !IsKilledByBranch(io.lsu.brupdate, s0_req(w).uop)
+        pf_done(w) := false.B
+        pf_uop(w) := s0_req(w).uop
+        pf_uop(w).br_mask := GetNewBrMask(io.lsu.brupdate, s0_req(w).uop)
+      }
+    }
+    mshrs.io.prefetch_done.foreach(done => completion.io.in(memWidth) <> done)
   }
 
   mshrs.io.meta_resp.valid      := !s2_nack_hit(0) || prober.io.mshr_wb_rdy

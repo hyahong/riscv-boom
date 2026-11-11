@@ -192,7 +192,7 @@ class LDQEntry(implicit p: Parameters) extends BoomBundle()(p)
   val executed            = Bool() // load sent to memory, reset by NACKs
   val succeeded           = Bool()
 
-  val miss_pending        = Bool() // MSHR accepts this load (data has not completed yet)
+  val miss_pending        = Bool() // confirmed L2 miss, with load data still outstanding
   val result_received     = Bool()
   val response_pending    = Bool() // cache data arrived before its SDM result
   val order_fail          = Bool()
@@ -1422,24 +1422,9 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       io.core.load_result(w).bits := result.bits
       io.core.load_result(w).bits.uop.br_mask := GetNewBrMask(io.core.brupdate, uop)
       when (io.core.load_result(w).valid && uop.uses_ldq) {
-        ldq(uop.ldq_idx).bits.result_received := true.B
-      }
-    }
-  }
-
-  // MSHR request is accepted in S2 stage
-  // it means that the load instruction occurs cache miss (L1)
-  if (enableSDM) {
-    for (w <- 0 until memWidth) {
-      val ack = io.dmem.miss_ack(w)
-      val uop = ack.bits
-      val entry = ldq(uop.ldq_idx)
-      val same_load = entry.valid && entry.bits.uop.rob_idx === uop.rob_idx &&
-        entry.bits.uop.pdst === uop.pdst
-      when (ack.valid && uop.uses_ldq && uop.mem_cmd === rocket.M_XRD &&
-        same_load && entry.bits.executed && !entry.bits.succeeded &&
-        !io.core.exception && !IsKilledByBranch(io.core.brupdate, uop)) {
-        ldq(uop.ldq_idx).bits.miss_pending := true.B
+        entry.bits.result_received := true.B
+        // early data response can still be waiting for this result before WB
+        entry.bits.miss_pending := result.bits.miss && !entry.bits.response_pending
       }
     }
   }
@@ -1457,6 +1442,7 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       {
         assert(ldq(io.dmem.nack(w).bits.uop.ldq_idx).bits.executed)
         ldq(io.dmem.nack(w).bits.uop.ldq_idx).bits.executed  := false.B
+        ldq(io.dmem.nack(w).bits.uop.ldq_idx).bits.miss_pending := false.B
         ldq(io.dmem.nack(w).bits.uop.ldq_idx).bits.result_received := false.B
         ldq(io.dmem.nack(w).bits.uop.ldq_idx).bits.response_pending := false.B
         nacking_loads(io.dmem.nack(w).bits.uop.ldq_idx) := true.B

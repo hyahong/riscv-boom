@@ -89,8 +89,6 @@ class LSUDMemIO(implicit p: Parameters, edge: TLEdgeOut) extends BoomBundle()(p)
   val resp        = Flipped(Vec(memWidth, new ValidIO(new BoomDCacheResp)))
   // In our response stage, if we get a nack, we need to reexecute
   val nack        = Flipped(Vec(memWidth, new ValidIO(new BoomDCacheReq)))
-  // cacheable load accepted by MSHR in DCache S2 (allocation or merge)
-  val miss_ack    = Flipped(Vec(memWidth, Valid(new MicroOp)))
   val load_result = Flipped(Vec(memWidth, Valid(new CoroLoadResult)))
   // SDM prefetch completion, after its result was delivered or the request was dropped
   val prefetch_done = Flipped(Decoupled(new MicroOp))

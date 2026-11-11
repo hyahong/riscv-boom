@@ -662,7 +662,6 @@ class BoomMSHRFile(receiveL2Results: Boolean)(implicit edge: TLEdgeOut, p: Param
     val resp = Decoupled(new BoomDCacheResp)
     val secondary_miss = Output(Vec(memWidth, Bool()))
     val block_hit = Output(Vec(memWidth, Bool()))
-    val miss_ack = Output(Vec(memWidth, Valid(new MicroOp)))
     val keep_refill = Input(Valid(UInt(corePAddrBits.W)))
     val l2_result = Option.when(receiveL2Results) {
       Flipped(Decoupled(new CacheAccessResult(math.max(1, log2Ceil(cfg.nMSHRs)))))
@@ -930,11 +929,6 @@ class BoomMSHRFile(receiveL2Results: Boolean)(implicit edge: TLEdgeOut, p: Param
     io.secondary_miss(w) := idx_match(w) && way_match(w) && !tag_match(w)
     io.block_hit(w)      := idx_match(w) && tag_match(w)
 
-    // is request accepted ?
-    io.miss_ack(w).valid := enableSDM.B && io.req(w).fire && cacheable &&
-      !io.req(w).bits.is_hella && io.req(w).bits.uop.uses_ldq &&
-      io.req(w).bits.uop.mem_cmd === M_XRD
-    io.miss_ack(w).bits := io.req(w).bits.uop
   }
   io.refill         <> refill_arb.io.out
 

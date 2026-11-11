@@ -444,7 +444,6 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   mshrs.io.exception    := io.lsu.exception
   mshrs.io.rob_pnr_idx  := io.lsu.rob_pnr_idx
   mshrs.io.rob_head_idx := io.lsu.rob_head_idx
-  io.lsu.miss_ack       := mshrs.io.miss_ack
 
   // tags
   def onReset = L1Metadata(0.U, ClientMetadata.onReset)

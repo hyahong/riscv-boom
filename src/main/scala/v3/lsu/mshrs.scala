@@ -407,6 +407,7 @@ class BoomMSHR(receiveL2Results: Boolean)(implicit edge: TLEdgeOut, p: Parameter
     io.resp.bits.uop  := rpq.io.deq.bits.uop
     io.resp.bits.data := loadgen.data
     io.resp.bits.is_hella := rpq.io.deq.bits.is_hella
+    io.resp.bits.wait_for_result := receiveL2Results.B && !rpq.io.deq.bits.is_hella && CoroLoadResult.isTracked(rpq.io.deq.bits.uop)
     when (rpq.io.deq.fire) {
       commit_line   := true.B
     }
@@ -603,6 +604,7 @@ class BoomIOMSHR(id: Int)(implicit edge: TLEdgeOut, p: Parameters) extends BoomM
   io.resp.bits.is_hella := req.is_hella
   io.resp.bits.uop  := req.uop
   io.resp.bits.data := loadgen.data
+  io.resp.bits.wait_for_result := false.B
 
   when (io.req.fire) {
     req   := io.req.bits

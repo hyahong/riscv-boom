@@ -933,6 +933,8 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
     cache_resp(w).bits.uop      := s2_req(w).uop
     cache_resp(w).bits.data     := loadgen(w).data | s2_sc_fail
     cache_resp(w).bits.is_hella := s2_req(w).is_hella
+    cache_resp(w).bits.wait_for_result := outer.receiveL2Results.B && s2_type === t_replay &&
+      !s2_req(w).is_hella && CoroLoadResult.isTracked(s2_req(w).uop)
   }
 
   val uncache_resp = Wire(Valid(new BoomDCacheResp))

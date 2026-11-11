@@ -75,6 +75,8 @@ class BoomDCacheResp(implicit p: Parameters) extends BoomBundle()(p)
 {
   val data = Bits(coreDataBits.W)
   val is_hella = Bool()
+  // separate load_result must reach the ROB before this load write back (can occur due to secondary request)
+  val wait_for_result = Bool()
 }
 
 class LSUDMemIO(implicit p: Parameters, edge: TLEdgeOut) extends BoomBundle()(p)
@@ -191,6 +193,8 @@ class LDQEntry(implicit p: Parameters) extends BoomBundle()(p)
   val succeeded           = Bool()
 
   val miss_pending        = Bool() // MSHR accepts this load (data has not completed yet)
+  val result_received     = Bool()
+  val response_pending    = Bool() // cache data arrived before its SDM result
   val order_fail          = Bool()
   val observed            = Bool()
 
@@ -200,7 +204,7 @@ class LDQEntry(implicit p: Parameters) extends BoomBundle()(p)
   val forward_std_val     = Bool()
   val forward_stq_idx     = UInt(stqAddrSz.W) // Which store did we get the store-load forward from?
 
-  val debug_wb_data       = UInt(xLen.W)
+  val debug_wb_data       = UInt(xLen.W) // hold an early response while awaiting its SDM result
 }
 
 class STQEntry(implicit p: Parameters) extends BoomBundle()(p)
@@ -324,13 +328,15 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       ldq(ld_enq_idx).bits.youngest_stq_idx  := st_enq_idx
       ldq(ld_enq_idx).bits.st_dep_mask     := next_live_store_mask
 
-      ldq(ld_enq_idx).bits.addr.valid      := false.B
-      ldq(ld_enq_idx).bits.executed        := false.B
-      ldq(ld_enq_idx).bits.succeeded       := false.B
-      ldq(ld_enq_idx).bits.miss_pending    := false.B
-      ldq(ld_enq_idx).bits.order_fail      := false.B
-      ldq(ld_enq_idx).bits.observed        := false.B
-      ldq(ld_enq_idx).bits.forward_std_val := false.B
+      ldq(ld_enq_idx).bits.addr.valid       := false.B
+      ldq(ld_enq_idx).bits.executed         := false.B
+      ldq(ld_enq_idx).bits.succeeded        := false.B
+      ldq(ld_enq_idx).bits.miss_pending     := false.B
+      ldq(ld_enq_idx).bits.result_received  := false.B
+      ldq(ld_enq_idx).bits.response_pending := false.B
+      ldq(ld_enq_idx).bits.order_fail       := false.B
+      ldq(ld_enq_idx).bits.observed         := false.B
+      ldq(ld_enq_idx).bits.forward_std_val  := false.B
 
       // internal restore can determine the physical address immediately after exp2
       if (enableSDM) {
@@ -1415,6 +1421,9 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
         !io.core.exception && !IsKilledByBranch(io.core.brupdate, uop)
       io.core.load_result(w).bits := result.bits
       io.core.load_result(w).bits.uop.br_mask := GetNewBrMask(io.core.brupdate, uop)
+      when (io.core.load_result(w).valid && uop.uses_ldq) {
+        ldq(uop.ldq_idx).bits.result_received := true.B
+      }
     }
   }
 
@@ -1448,6 +1457,8 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       {
         assert(ldq(io.dmem.nack(w).bits.uop.ldq_idx).bits.executed)
         ldq(io.dmem.nack(w).bits.uop.ldq_idx).bits.executed  := false.B
+        ldq(io.dmem.nack(w).bits.uop.ldq_idx).bits.result_received := false.B
+        ldq(io.dmem.nack(w).bits.uop.ldq_idx).bits.response_pending := false.B
         nacking_loads(io.dmem.nack(w).bits.uop.ldq_idx) := true.B
       }
         .elsewhen (io.dmem.nack(w).bits.uop.uses_stq)
@@ -1470,20 +1481,23 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
         val ldq_idx = io.dmem.resp(w).bits.uop.ldq_idx
         val send_iresp = ldq(ldq_idx).bits.uop.dst_rtype === RT_FIX
         val send_fresp = ldq(ldq_idx).bits.uop.dst_rtype === RT_FLT
+        val wait_for_result = enableSDM.B && io.dmem.resp(w).bits.wait_for_result &&
+          !ldq(ldq_idx).bits.result_received
 
         io.core.exe(w).iresp.bits.uop  := ldq(ldq_idx).bits.uop
         io.core.exe(w).fresp.bits.uop  := ldq(ldq_idx).bits.uop
-        io.core.exe(w).iresp.valid     := send_iresp
+        io.core.exe(w).iresp.valid     := send_iresp && !wait_for_result
         io.core.exe(w).iresp.bits.data := io.dmem.resp(w).bits.data
-        io.core.exe(w).fresp.valid     := send_fresp
+        io.core.exe(w).fresp.valid     := send_fresp && !wait_for_result
         io.core.exe(w).fresp.bits.data := io.dmem.resp(w).bits.data
 
         assert(send_iresp ^ send_fresp)
         dmem_resp_fired(w) := true.B
 
-        ldq(ldq_idx).bits.succeeded      := io.core.exe(w).iresp.valid || io.core.exe(w).fresp.valid
-        ldq(ldq_idx).bits.miss_pending   := false.B
-        ldq(ldq_idx).bits.debug_wb_data  := io.dmem.resp(w).bits.data
+        ldq(ldq_idx).bits.succeeded        := io.core.exe(w).iresp.valid || io.core.exe(w).fresp.valid
+        ldq(ldq_idx).bits.miss_pending     := false.B
+        ldq(ldq_idx).bits.response_pending := wait_for_result
+        ldq(ldq_idx).bits.debug_wb_data    := io.dmem.resp(w).bits.data
       }
         .elsewhen (io.dmem.resp(w).bits.uop.uses_stq)
       {
@@ -1528,12 +1542,35 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       io.core.exe(w).fresp.bits.data := loadgen.data
 
       when (data_ready && live) {
-        ldq(f_idx).bits.succeeded := data_ready
-        ldq(f_idx).bits.miss_pending := false.B
-        ldq(f_idx).bits.forward_std_val := true.B
-        ldq(f_idx).bits.forward_stq_idx := wb_forward_stq_idx(w)
+        ldq(f_idx).bits.succeeded        := data_ready
+        ldq(f_idx).bits.miss_pending     := false.B
+        ldq(f_idx).bits.response_pending := false.B
+        ldq(f_idx).bits.forward_std_val  := true.B
+        ldq(f_idx).bits.forward_stq_idx  := wb_forward_stq_idx(w)
 
-        ldq(f_idx).bits.debug_wb_data   := loadgen.data
+        ldq(f_idx).bits.debug_wb_data    := loadgen.data
+      }
+    }
+  }
+
+  if (enableSDM) {
+    val pending = VecInit(ldq.map(e => e.valid && e.bits.response_pending && e.bits.result_received &&
+      !e.bits.succeeded))
+    val pending_valid = RegNext(pending.asUInt.orR, false.B)
+    val pending_idx = RegNext(AgePriorityEncoder(pending, ldq_head))
+    val entry = ldq(pending_idx)
+    val live = pending_valid && pending(pending_idx) && !nacking_loads(pending_idx) &&
+      !io.core.exception && !IsKilledByBranch(io.core.brupdate, entry.bits.uop)
+    val free_lanes = VecInit((0 until memWidth).map(w => !dmem_resp_fired(w) && !wb_forward_valid(w))).asUInt
+    val selected = PriorityEncoderOH(free_lanes)
+    for (w <- 0 until memWidth) {
+      when (live && selected(w)) {
+        assert(entry.bits.uop.dst_rtype === RT_FIX && CoroLoadResult.isTracked(entry.bits.uop))
+        io.core.exe(w).iresp.valid := true.B
+        io.core.exe(w).iresp.bits.uop := UpdateBrMask(io.core.brupdate, entry.bits.uop)
+        io.core.exe(w).iresp.bits.data := entry.bits.debug_wb_data
+        entry.bits.succeeded := true.B
+        entry.bits.response_pending := false.B
       }
     }
   }
@@ -1548,13 +1585,16 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       (e.iresp.valid && e.iresp.bits.uop.uses_ldq && e.iresp.bits.uop.ldq_idx === ldq_head) ||
       (e.fresp.valid && e.fresp.bits.uop.uses_ldq && e.fresp.bits.uop.ldq_idx === ldq_head)
     }.reduce(_||_)
+    val receiving = io.dmem.resp.map(r => r.valid && r.bits.uop.uses_ldq &&
+      r.bits.uop.ldq_idx === ldq_head).reduce(_ || _)
     io.core.miss_candidate.valid := io.core.rob_head_load.valid && entry.valid &&
       uop.rob_idx === io.core.rob_head_load.bits &&
       uop.uses_ldq && uop.mem_cmd === rocket.M_XRD && uop.sdm.context.is_coro && !uop.is_internal &&
       entry.bits.addr.valid && !entry.bits.addr_is_virtual && !entry.bits.addr_is_uncacheable &&
       entry.bits.executed && entry.bits.miss_pending && !entry.bits.succeeded &&
       !uop.exception && !entry.bits.order_fail && !failed_loads(ldq_head) && !nacking_loads(ldq_head) &&
-      !completing && !io.core.exception && !io.core.commit.rollback && !IsKilledByBranch(io.core.brupdate, uop)
+      !receiving && !entry.bits.response_pending && !completing &&
+      !io.core.exception && !io.core.commit.rollback && !IsKilledByBranch(io.core.brupdate, uop)
     io.core.miss_candidate.bits := UpdateBrMask(io.core.brupdate, uop)
 
     when (io.core.exception_request && io.core.miss_candidate.valid && !lxcpt_valid) {
@@ -1614,9 +1654,11 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       ldq(i).bits.uop.br_mask := GetNewBrMask(io.core.brupdate, ldq(i).bits.uop.br_mask)
       when (IsKilledByBranch(io.core.brupdate, ldq(i).bits.uop))
       {
-        ldq(i).valid             := false.B
-        ldq(i).bits.addr.valid   := false.B
-        ldq(i).bits.miss_pending := false.B
+        ldq(i).valid                 := false.B
+        ldq(i).bits.addr.valid       := false.B
+        ldq(i).bits.miss_pending     := false.B
+        ldq(i).bits.result_received  := false.B
+        ldq(i).bits.response_pending := false.B
       }
     }
   }
@@ -1654,6 +1696,8 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       ldq(idx).bits.executed         := false.B
       ldq(idx).bits.succeeded        := false.B
       ldq(idx).bits.miss_pending     := false.B
+      ldq(idx).bits.result_received  := false.B
+      ldq(idx).bits.response_pending := false.B
       ldq(idx).bits.order_fail       := false.B
       ldq(idx).bits.forward_std_val  := false.B
 
@@ -1823,10 +1867,12 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
 
     for (i <- 0 until numLdqEntries)
     {
-      ldq(i).valid             := false.B
-      ldq(i).bits.addr.valid   := false.B
-      ldq(i).bits.executed     := false.B
-      ldq(i).bits.miss_pending := false.B
+      ldq(i).valid                 := false.B
+      ldq(i).bits.addr.valid       := false.B
+      ldq(i).bits.executed         := false.B
+      ldq(i).bits.miss_pending     := false.B
+      ldq(i).bits.result_received  := false.B
+      ldq(i).bits.response_pending := false.B
     }
   }
 

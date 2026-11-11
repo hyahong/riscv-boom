@@ -438,7 +438,6 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
     mshrs.io.l2_result.get <> node.bundle
   }
 
-  mshrs.io.load_result.foreach(_.ready := true.B)
   mshrs.io.keep_refill  := io.lsu.keep_refill
   mshrs.io.clear_all    := io.lsu.force_order
   mshrs.io.brupdate     := io.lsu.brupdate
@@ -611,10 +610,15 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   for (w <- 0 until memWidth)
     s1_req(w).uop.br_mask := GetNewBrMask(io.lsu.brupdate, s0_req(w).uop)
   val s2_store_failed = Wire(Bool())
+
+  // SDM prefetch has no LDQ entry, but retain their speculative uop lifetime
+  def killedByException(uop: MicroOp): Bool = io.lsu.exception &&
+    (uop.uses_ldq || (enableSDM.B && uop.is_sdm_prefetch))
+
   val s1_valid = widthMap(w =>
-                 RegNext(s0_valid(w)                                     &&
+                 RegNext(s0_valid(w) &&
                          !IsKilledByBranch(io.lsu.brupdate, s0_req(w).uop) &&
-                         !(io.lsu.exception && s0_req(w).uop.uses_ldq)   &&
+                         !killedByException(s0_req(w).uop) &&
                          !(s2_store_failed && io.lsu.req.fire && s0_req(w).uop.uses_stq),
                          init=false.B))
   for (w <- 0 until memWidth)
@@ -645,7 +649,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
                   RegNext(s1_valid(w) &&
                          !io.lsu.s1_kill(w) &&
                          !IsKilledByBranch(io.lsu.brupdate, s1_req(w).uop) &&
-                         !(io.lsu.exception && s1_req(w).uop.uses_ldq) &&
+                         !killedByException(s1_req(w).uop) &&
                          !(s2_store_failed && (s1_type === t_lsu) && s1_req(w).uop.uses_stq)))
   for (w <- 0 until memWidth)
     s2_req(w).uop.br_mask := GetNewBrMask(io.lsu.brupdate, s1_req(w).uop)
@@ -761,7 +765,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
                             !s2_nack_wb(w)        &&
                              s2_type.isOneOf(t_lsu, t_prefetch)             &&
                             !IsKilledByBranch(io.lsu.brupdate, s2_req(w).uop) &&
-                            !(io.lsu.exception && s2_req(w).uop.uses_ldq)   &&
+                            !killedByException(s2_req(w).uop) &&
                              (isPrefetch(s2_req(w).uop.mem_cmd) ||
                               isRead(s2_req(w).uop.mem_cmd)     ||
                               isWrite(s2_req(w).uop.mem_cmd))
@@ -781,6 +785,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
 
   io.lsu.load_result := 0.U.asTypeOf(io.lsu.load_result)
   if (enableSDM) {
+    val hit_results = WireInit(0.U.asTypeOf(io.lsu.load_result))
     for (w <- 0 until memWidth) {
       val s1_observe = RegNext(s0_valid(w) && s0_type === t_lsu &&
         !s0_req(w).is_hella && CoroLoadResult.isTracked(s0_req(w).uop) &&
@@ -788,13 +793,28 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
       val s2_observe = RegNext(s1_observe && !io.lsu.s1_kill(w) &&
         !io.lsu.exception && !IsKilledByBranch(io.lsu.brupdate, s1_req(w).uop), false.B)
       val cacheable = edge.manager.supportsAcquireBFast(s2_req(w).addr, lgCacheBlockBytes.U)
-      io.lsu.load_result(w).valid := s2_observe && s2_valid(w) && cacheable &&
-        !s2_nack(w) && (s2_hit(w) || mshrs.io.req(w).fire) &&
+      hit_results(w).valid := s2_observe && s2_valid(w) && cacheable &&
+        !s2_nack(w) && s2_hit(w) &&
         !io.lsu.exception && !IsKilledByBranch(io.lsu.brupdate, s2_req(w).uop)
-      io.lsu.load_result(w).bits.uop := s2_req(w).uop
-      io.lsu.load_result(w).bits.uop.br_mask := GetNewBrMask(io.lsu.brupdate, s2_req(w).uop)
-      io.lsu.load_result(w).bits.miss := !s2_hit(w)
+      hit_results(w).bits.uop := s2_req(w).uop
+      hit_results(w).bits.uop.br_mask := GetNewBrMask(io.lsu.brupdate, s2_req(w).uop)
+      hit_results(w).bits.miss := false.B
     }
+    io.lsu.load_result := hit_results
+
+    mshrs.io.load_result.foreach { result =>
+      val free_lanes = VecInit(hit_results.map(r => !r.valid)).asUInt
+      val selected = PriorityEncoderOH(free_lanes)
+      result.ready := free_lanes.orR
+      for (w <- 0 until memWidth) {
+        when (selected(w) && result.valid) {
+          io.lsu.load_result(w).valid := true.B
+          io.lsu.load_result(w).bits := result.bits
+        }
+      }
+    }
+  } else {
+    mshrs.io.load_result.foreach(_.ready := true.B)
   }
 
   mshrs.io.meta_resp.valid      := !s2_nack_hit(0) || prober.io.mshr_wb_rdy
@@ -883,12 +903,12 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
 
   for (w <- 0 until memWidth) {
     io.lsu.resp(w).valid := resp(w).valid &&
-                            !(io.lsu.exception && resp(w).bits.uop.uses_ldq) &&
+                            !killedByException(resp(w).bits.uop) &&
                             !IsKilledByBranch(io.lsu.brupdate, resp(w).bits.uop)
     io.lsu.resp(w).bits  := UpdateBrMask(io.lsu.brupdate, resp(w).bits)
 
     io.lsu.nack(w).valid := s2_valid(w) && s2_send_nack(w) &&
-                            !(io.lsu.exception && s2_req(w).uop.uses_ldq) &&
+                            !killedByException(s2_req(w).uop) &&
                             !IsKilledByBranch(io.lsu.brupdate, s2_req(w).uop)
     io.lsu.nack(w).bits  := UpdateBrMask(io.lsu.brupdate, s2_req(w))
     assert(!(io.lsu.nack(w).valid && s2_type =/= t_lsu))

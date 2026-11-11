@@ -1380,8 +1380,14 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
         entry.bits.uop.rob_idx === uop.rob_idx && entry.bits.uop.pdst === uop.pdst &&
         entry.bits.uop.ftq_idx === uop.ftq_idx && entry.bits.uop.pc_lob === uop.pc_lob &&
         entry.bits.uop.sdm.context.asUInt === uop.sdm.context.asUInt
+      val nacked = io.dmem.nack.map { nack =>
+        val n = nack.bits.uop
+        nack.valid && !nack.bits.is_hella && n.rob_idx === uop.rob_idx && n.pdst === uop.pdst &&
+          n.ftq_idx === uop.ftq_idx && n.pc_lob === uop.pc_lob &&
+          n.sdm.context.asUInt === uop.sdm.context.asUInt
+      }.reduce(_ || _)
       io.core.load_result(w).valid := result.valid && CoroLoadResult.isTracked(uop) &&
-        (uop.is_sdm_prefetch || same_load) && !io.dmem.nack(w).valid &&
+        (uop.is_sdm_prefetch || same_load) && !nacked &&
         !io.core.exception && !IsKilledByBranch(io.core.brupdate, uop)
       io.core.load_result(w).bits := result.bits
       io.core.load_result(w).bits.uop.br_mask := GetNewBrMask(io.core.brupdate, uop)

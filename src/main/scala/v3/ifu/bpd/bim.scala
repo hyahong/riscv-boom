@@ -66,7 +66,7 @@ class BIMBranchPredictorBank(params: BoomBIMParams = BoomBIMParams())(implicit p
   val s1_update_wmask   = Wire(Vec(bankWidth, Bool()))
   val s1_update_meta    = s1_update.bits.meta.asTypeOf(new BIMMeta)
   val s1_update_index   = s1_update_idx
-  val s1_load_update    = enableSDM.B && s1_update.bits.load_idx.valid
+  val s1_load_update    = enableSDM.B && s1_update.bits.load_mask.orR
   val s1_train          = s1_update.valid && (s1_update.bits.is_commit_update || s1_load_update)
 
   val wrbypass_idxs = Reg(Vec(nWrBypassEntries, UInt(log2Ceil(nSets).W)))
@@ -87,10 +87,10 @@ class BIMBranchPredictorBank(params: BoomBIMParams = BoomBIMParams())(implicit p
     s1_update_wmask(w)         := false.B
     s1_update_wdata(w)         := DontCare
 
-    val selected = Mux(s1_load_update, s1_update.bits.load_idx.bits === w.U,
+    val selected = Mux(s1_load_update, s1_update.bits.load_mask(w),
       s1_update.bits.br_mask(w) || (s1_update.bits.cfi_idx.valid && s1_update.bits.cfi_idx.bits === w.U))
     when (selected) {
-      val was_taken = Mux(s1_load_update, s1_update.bits.load_miss,
+      val was_taken = Mux(s1_load_update, s1_update.bits.load_misses(w),
         s1_update.bits.cfi_idx.valid &&
         (s1_update.bits.cfi_idx.bits === w.U) &&
         (

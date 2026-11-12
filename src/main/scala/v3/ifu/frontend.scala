@@ -1013,10 +1013,10 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
   val f3_btb_mispredict_mask = f3_btb_mispredicts.asUInt & f3_fetch_bundle.mask
   f4_btb_corrections.io.enq.valid := f3.io.deq.fire && f3_btb_mispredict_mask.orR && enableBTBFastRepair.B
   f4_btb_corrections.io.enq.bits  := DontCare
-  f4_btb_corrections.io.enq.bits.load_idx := 0.U.asTypeOf(f4_btb_corrections.io.enq.bits.load_idx)
-  f4_btb_corrections.io.enq.bits.load_miss := false.B
+  f4_btb_corrections.io.enq.bits.load_mask := 0.U
+  f4_btb_corrections.io.enq.bits.load_misses := 0.U
   f4_btb_corrections.io.enq.bits.load_prediction := 0.U.asTypeOf(f4_btb_corrections.io.enq.bits.load_prediction)
-  f4_btb_corrections.io.enq.bits.load_alt_differs := false.B
+  f4_btb_corrections.io.enq.bits.load_alt_differs := 0.U
   f4_btb_corrections.io.enq.bits.is_mispredict_update := false.B
   f4_btb_corrections.io.enq.bits.is_repair_update     := false.B
   f4_btb_corrections.io.enq.bits.btb_mispredicts      := f3_btb_mispredict_mask

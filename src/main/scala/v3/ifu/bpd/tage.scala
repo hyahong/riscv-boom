@@ -242,9 +242,11 @@ class TageBranchPredictorBank(params: BoomTageParams = BoomTageParams())(implici
   val s1_update_meta = s1_update.bits.meta.asTypeOf(new TageMeta)
   val s1_update_mispredict_mask = UIntToOH(s1_update.bits.cfi_idx.bits) &
     Fill(bankWidth, s1_update.bits.cfi_mispredicted)
-  val s1_load_update = enableSDM.B && s1_update.bits.load_idx.valid
-  val s1_load_mispredicted = !s1_update.bits.load_prediction.valid ||
-    s1_update.bits.load_prediction.bits =/= s1_update.bits.load_miss
+  val s1_load_update = enableSDM.B && s1_update.bits.load_mask.orR
+  val s1_load_mispredicted = VecInit((0 until bankWidth).map { w =>
+    !s1_update.bits.load_prediction(w).valid ||
+      s1_update.bits.load_prediction(w).bits =/= s1_update.bits.load_misses(w)
+  })
 
   val s1_update_mask  = WireInit((0.U).asTypeOf(Vec(tageNTables, Vec(bankWidth, Bool()))))
   val s1_update_u_mask  = WireInit((0.U).asTypeOf(Vec(tageNTables, Vec(bankWidth, UInt(1.W)))))
@@ -328,15 +330,15 @@ class TageBranchPredictorBank(params: BoomTageParams = BoomTageParams())(implici
     f3_meta.allocate(w).valid := allocatable_slots =/= 0.U
     f3_meta.allocate(w).bits  := alloc_entry
 
-    val load_slot = s1_load_update && s1_update.bits.load_idx.bits === w.U
-    val update_was_taken = Mux(load_slot, s1_update.bits.load_miss,
+    val load_slot = s1_load_update && s1_update.bits.load_mask(w)
+    val update_was_taken = Mux(load_slot, s1_update.bits.load_misses(w),
                             s1_update.bits.cfi_idx.valid &&
                             (s1_update.bits.cfi_idx.bits === w.U) &&
                             s1_update.bits.cfi_taken)
     val alt_differs = Mux(load_slot,
-      s1_update.bits.load_prediction.valid && s1_update.bits.load_alt_differs,
+      s1_update.bits.load_prediction(w).valid && s1_update.bits.load_alt_differs(w),
       s1_update_meta.alt_differs(w))
-    val mispredicted = Mux(load_slot, s1_load_mispredicted, s1_update_mispredict_mask(w))
+    val mispredicted = Mux(load_slot, s1_load_mispredicted(w), s1_update_mispredict_mask(w))
     when (s1_update.valid && (load_slot || (s1_update.bits.br_mask(w) && s1_update.bits.is_commit_update))) {
       when (s1_update_meta.provider(w).valid) {
         val provider = s1_update_meta.provider(w).bits
@@ -353,32 +355,33 @@ class TageBranchPredictorBank(params: BoomTageParams = BoomTageParams())(implici
       }
     }
   }
-  val allocate_update = Mux(s1_load_update, s1_load_mispredicted,
-    s1_update.bits.is_commit_update && s1_update.bits.cfi_mispredicted && s1_update.bits.cfi_idx.valid)
-  when (s1_update.valid && allocate_update) {
-    val idx = Mux(s1_load_update, s1_update.bits.load_idx.bits, s1_update.bits.cfi_idx.bits)
-    val allocate = s1_update_meta.allocate(idx)
-    when (allocate.valid) {
-      s1_update_mask (allocate.bits)(idx) := true.B
-      s1_update_taken(allocate.bits)(idx) := Mux(s1_load_update, s1_update.bits.load_miss, s1_update.bits.cfi_taken)
-      s1_update_alloc(allocate.bits)(idx) := true.B
-
-      s1_update_u_mask(allocate.bits)(idx) := true.B
-      s1_update_u     (allocate.bits)(idx) := 0.U
-
-    } .otherwise {
-      val provider = s1_update_meta.provider(idx)
-      val decr_mask = Mux(provider.valid, ~MaskLower(UIntToOH(provider.bits)), 0.U)
-
-      for (i <- 0 until tageNTables) {
-        when (decr_mask(i)) {
-          s1_update_u_mask(i)(idx) := true.B
-          s1_update_u     (i)(idx) := 0.U
+  for (w <- 0 until bankWidth) {
+    val allocate_update = Mux(s1_load_update,
+      s1_update.bits.load_mask(w) && s1_load_mispredicted(w),
+      s1_update.bits.is_commit_update && s1_update.bits.cfi_mispredicted &&
+        s1_update.bits.cfi_idx.valid && s1_update.bits.cfi_idx.bits === w.U)
+    when (s1_update.valid && allocate_update) {
+      val allocate = s1_update_meta.allocate(w)
+      when (allocate.valid) {
+        s1_update_mask (allocate.bits)(w) := true.B
+        s1_update_taken(allocate.bits)(w) := Mux(s1_load_update,
+          s1_update.bits.load_misses(w), s1_update.bits.cfi_taken)
+        s1_update_alloc(allocate.bits)(w) := true.B
+        s1_update_u_mask(allocate.bits)(w) := true.B
+        s1_update_u(allocate.bits)(w) := 0.U
+      } .otherwise {
+        val provider = s1_update_meta.provider(w)
+        val decr_mask = Mux(provider.valid, ~MaskLower(UIntToOH(provider.bits)), 0.U)
+        for (i <- 0 until tageNTables) {
+          when (decr_mask(i)) {
+            s1_update_u_mask(i)(w) := true.B
+            s1_update_u(i)(w) := 0.U
+          }
         }
       }
     }
-
   }
+
 
 
   for (i <- 0 until tageNTables) {

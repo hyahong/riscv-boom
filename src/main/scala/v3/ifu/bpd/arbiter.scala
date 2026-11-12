@@ -27,35 +27,17 @@ class PredictorUpdateArbiter(implicit p: Parameters) extends BoomModule
 
   io.load.ready := true.B
   if (enableSDM) {
-    val consumed = RegInit(0.U(fetchWidth.W))
-    val remaining = io.load.bits.mask & ~consumed
-    val slot = PriorityEncoder(remaining)
-    val selected = UIntToOH(slot, fetchWidth)
-    val last = (remaining & ~selected) === 0.U
     val load = arbiter.io.in(2)
-
-    load.valid := io.load.valid && remaining.orR
+    load.valid := io.load.valid && io.load.bits.mask.orR
     load.bits := 0.U.asTypeOf(load.bits)
     load.bits.pc := io.load.bits.pc
     load.bits.ghist := io.load.bits.ghist
     load.bits.lhist := io.load.bits.lhist
     load.bits.meta := io.load.bits.meta
-    load.bits.load_idx.valid := true.B
-    load.bits.load_idx.bits := slot
-    load.bits.load_miss := io.load.bits.misses(slot)
-    load.bits.load_prediction := io.load.bits.prediction(slot)
-    load.bits.load_alt_differs := io.load.bits.alt_differs(slot)
-
-    io.load.ready := !remaining.orR || (load.ready && last)
-    when (io.load.fire) {
-      consumed := 0.U
-    } .elsewhen (load.fire) {
-      consumed := consumed | selected
-    }
-
-    when (consumed.orR) {
-      assert(io.load.valid, "partially consumed load packet must remain available")
-      assert((consumed & ~io.load.bits.mask) === 0.U, "load packet changed before completion")
-    }
+    load.bits.load_mask := io.load.bits.mask
+    load.bits.load_misses := io.load.bits.misses
+    load.bits.load_prediction := io.load.bits.prediction
+    load.bits.load_alt_differs := io.load.bits.alt_differs
+    io.load.ready := !io.load.bits.mask.orR || load.ready
   }
 }

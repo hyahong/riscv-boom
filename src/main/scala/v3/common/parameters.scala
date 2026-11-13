@@ -59,6 +59,7 @@ case class BoomCoreParams(
 
   /* software-defined manycore */
   enableSDM: Boolean = false,
+  enableSDMFP: Boolean = false,
   maxCoroContexts: Int = 32,
   numCoroPCEntries: Int = 8,
 
@@ -114,6 +115,8 @@ case class BoomCoreParams(
 {
   require(isPow2(maxCoroContexts), "maxCoroContexts must be a power of 2")
   require(isPow2(numCoroPCEntries), "numCoroPCEntries must be a power of 2")
+  require(!enableSDMFP || enableSDM, "SDM FP support requires SDM")
+  require(!enableSDMFP || fpu.exists(_.fLen == 64), "SDM FP support requires a 64-bit FPU")
 
   override def traceCustom = Some(new BoomTraceBundle)
   val xLen = 64
@@ -173,6 +176,7 @@ trait HasBoomCoreParameters extends freechips.rocketchip.tile.HasCoreParameters
   //************************************
   // Software-Defined Manycore
   val enableSDM        = boomParams.enableSDM
+  val enableSDMFP      = boomParams.enableSDMFP
   val maxCoroContexts  = boomParams.maxCoroContexts
   val numCoroPCEntries = boomParams.numCoroPCEntries
 
@@ -181,6 +185,9 @@ trait HasBoomCoreParameters extends freechips.rocketchip.tile.HasCoreParameters
   val coroFrameIndexBits    = coroCountBits // worker 0..N-1, host N.
   val coroPCBufferPtrBits   = log2Ceil(numCoroPCEntries) + 1 // index + wrap bit
   val coroNumIntRegisters   = 32 // include x0 to simplify address calculation
+  val coroNumFpRegisters    = if (enableSDMFP) 32 else 0
+  val coroNumRegisters      = coroNumIntRegisters + coroNumFpRegisters
+  val coroRegisterMask      = (BigInt(1) << coroNumRegisters) - 2 // exclude x0, include f0.
   val coroRegisterBytes     = 8
 
   //************************************

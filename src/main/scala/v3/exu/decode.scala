@@ -639,20 +639,23 @@ class DecodeUnit(implicit p: Parameters) extends BoomModule
   uop.imm_packed := Cat(inst(31,25), di24_20, inst(19,12))
 
   // only accepted frontend transition converts the load
+  val is_sdm_load = cs.legal && cs.uopc === uopLD && cs.mem_cmd === M_XRD &&
+    (cs.dst_type === RT_FIX || (enableSDMFP.B && cs.dst_type === RT_FLT))
   uop.sdm.prefetch := false.B
   uop.sdm.resume_load := enableSDM.B && io.enq.uop.sdm.resume_load &&
-    io.enq.uop.sdm.context.is_coro && !io.enq.uop.is_internal &&
-    cs.legal && cs.uopc === uopLD && cs.mem_cmd === M_XRD && cs.dst_type === RT_FIX
+    io.enq.uop.sdm.context.is_coro && !io.enq.uop.is_internal && is_sdm_load
   if (enableSDM) {
     when (io.enq.uop.sdm.prefetch && io.enq.uop.sdm.context.is_coro &&
       !io.enq.uop.is_internal && !io.enq.uop.is_sfb && !io.enq.uop.sdm.resume_load && !xcpt_valid &&
-      cs.legal && cs.uopc === uopLD && cs.mem_cmd === M_XRD && cs.dst_type === RT_FIX) {
+      is_sdm_load) {
       uop.uopc := uopPREFETCH
       uop.is_internal := true.B
       uop.sdm.prefetch := true.B
       uop.ldst := 0.U
       uop.ldst_val := false.B
       uop.dst_rtype := RT_X
+      uop.fp_val := false.B
+      uop.fp_single := false.B
       uop.uses_ldq := false.B
       uop.uses_stq := false.B
       uop.mem_cmd := M_PFR

@@ -15,25 +15,27 @@ object CoroRegisterOp extends ChiselEnum
 class CoroRegisterStatus(implicit p: Parameters) extends BoomBundle
 {
   val context = new SDMContextTag
-  val valid   = UInt(coroNumIntRegisters.W)
-  val dirty   = UInt(coroNumIntRegisters.W)
+  val valid   = UInt(coroNumRegisters.W)
+  val dirty   = UInt(coroNumRegisters.W)
 }
 
 class CoroRegisterUpdate(implicit p: Parameters) extends BoomBundle
 {
   val context = new SDMContextTag
   val op      = CoroRegisterOp()
-  val lreg    = UInt(log2Ceil(coroNumIntRegisters).W)
+  val lreg    = UInt(log2Ceil(coroNumRegisters).W)
 
   def setFromUop(uop: MicroOp): Unit = {
     context := uop.sdm.context
     op := CoroRegisterOp.NONE
-    lreg := uop.ldst
+    // FP comparisons and conversions may write an integer destination
+    lreg := SDMRegister.slot(uop.dst_rtype, uop.ldst, enableSDMFP)
     when (!uop.exception && (uop.sdm.context.is_coro || uop.is_internal)) {
-      when (uop.is_internal && uop.uses_stq && uop.lrs2_rtype === RT_FIX) {
+      when (uop.is_internal && uop.uses_stq &&
+        SDMRegister.isValid(uop.lrs2_rtype, uop.lrs2, enableSDMFP)) {
         op := CoroRegisterOp.SAVE
-        lreg := uop.lrs2
-      } .elsewhen (uop.ldst_val && uop.dst_rtype === RT_FIX) {
+        lreg := SDMRegister.slot(uop.lrs2_rtype, uop.lrs2, enableSDMFP)
+      } .elsewhen (uop.ldst_val && SDMRegister.isValid(uop.dst_rtype, uop.ldst, enableSDMFP)) {
         op := Mux(uop.is_internal && uop.uses_ldq,
           CoroRegisterOp.RESTORE, CoroRegisterOp.WRITE)
       }
@@ -65,7 +67,7 @@ class CoroRegisterState(implicit p: Parameters) extends BoomModule
   val spec_state   = RegInit(0.U.asTypeOf(new CoroRegisterStatus))
   val com_state    = RegInit(0.U.asTypeOf(new CoroRegisterStatus))
   val br_snapshots = Reg(Vec(maxBrCount, new CoroRegisterStatus))
-  val register_mask = ((BigInt(1) << coroNumIntRegisters) - 2).U(coroNumIntRegisters.W)
+  val register_mask = coroRegisterMask.U(coroNumRegisters.W)
 
   val live = !reset.asBool && !io.init.valid
   val accept = live && !io.kill && !io.flush && !io.rollback.valid
@@ -78,7 +80,7 @@ class CoroRegisterState(implicit p: Parameters) extends BoomModule
       (!op.context.is_coro || before.context.cid === op.context.cid)
     val valid = Mux(same_context, before.valid, 0.U)
     val dirty = Mux(same_context, before.dirty, 0.U)
-    val reg_mask = UIntToOH(op.lreg, coroNumIntRegisters) & register_mask
+    val reg_mask = UIntToOH(op.lreg, coroNumRegisters) & register_mask
 
     after := before
     when (enable && update.valid) {

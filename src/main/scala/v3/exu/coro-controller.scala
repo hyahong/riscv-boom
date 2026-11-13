@@ -172,7 +172,7 @@ class CoroController(implicit p: Parameters) extends BoomModule
 
   // valid/dirty bitmap
   io.init := 0.U.asTypeOf(io.init)
-  io.init.bits.valid := ((BigInt(1) << coroNumIntRegisters) - 2).U
+  io.init.bits.valid := coroRegisterMask.U(coroNumRegisters.W)
   io.init.bits.dirty := io.init.bits.valid
 
   io.boundary.valid := false.B
@@ -234,7 +234,7 @@ class CoroController(implicit p: Parameters) extends BoomModule
         entry_valid := entry_valid | UIntToOH(pending.rs1, maxCoroContexts)
       }
       is (uopSDM.SET_FRAME) {
-        val last_byte = pending.rs1 +& ((BigInt(maxCoroContexts) + 1) * 32 * 8 - 1).U
+        val last_byte = pending.rs1 +& ((BigInt(maxCoroContexts) + 1) * coroNumRegisters * coroRegisterBytes - 1).U
         assert(pending.rs1(2, 0) === 0.U, "frame base must be doubleword aligned")
         assert((last_byte >> corePAddrBits) === 0.U, "frames must fit the physical address space")
 
@@ -340,7 +340,7 @@ class CoroController(implicit p: Parameters) extends BoomModule
       io.boundary.bits.sdm.context := 0.U.asTypeOf(new SDMContextTag)
 
       val restored = !io.committed.context.is_coro &&
-        io.committed.valid === ((BigInt(1) << coroNumIntRegisters) - 2).U
+        io.committed.valid === coroRegisterMask.U(coroNumRegisters.W)
       when (restored && io.pipeline_empty && !io.flush) {
         state := s_join_3
       }

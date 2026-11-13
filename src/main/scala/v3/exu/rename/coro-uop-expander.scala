@@ -34,15 +34,18 @@ object CoroUopExpander
     uop
   }
 
-  private def restoreUop(consumer: MicroOp, lreg: UInt)(implicit p: Parameters): MicroOp = {
+  private def restoreUop(consumer: MicroOp, slot: UInt)(implicit p: Parameters): MicroOp = {
     val uop = copyUop(consumer)
+    val lreg = slot(4, 0)
+    val is_fp = if (uop.enableSDMFP) slot(5) else false.B
 
     uop.uopc := uopLD
     uop.is_internal := true.B
 
     uop.ldst := lreg
     uop.ldst_val := true.B
-    uop.dst_rtype := RT_FIX
+    uop.dst_rtype := Mux(is_fp, RT_FLT, RT_FIX)
+    uop.fp_val := is_fp
     uop.lrs1_rtype := RT_X
     uop.lrs2_rtype := RT_X
 
@@ -53,30 +56,34 @@ object CoroUopExpander
     uop.mem_size := 3.U
     uop.mem_signed := true.B
 
-    uop.inst := Cat(0.U(17.W), 3.U(3.W), lreg, "b0000011".U(7.W))
+    uop.inst := Cat(0.U(17.W), 3.U(3.W), lreg, Mux(is_fp, "b0000111".U(7.W), "b0000011".U(7.W)))
     uop.debug_inst := uop.inst
 
     uop
   }
 
-  private def saveUop(boundary: MicroOp, lreg: UInt)(implicit p: Parameters): MicroOp = {
+  private def saveUop(boundary: MicroOp, slot: UInt)(implicit p: Parameters): MicroOp = {
     val uop = copyUop(boundary)
+    val lreg = slot(4, 0)
+    val is_fp = if (uop.enableSDMFP) slot(5) else false.B
 
-    uop.uopc := uopSTD
+    // FP pipeline uses uopSTA for store data
+    uop.uopc := Mux(is_fp, uopSTA, uopSTD)
     uop.is_internal := true.B
 
     uop.dst_rtype := RT_X
     uop.lrs1_rtype := RT_X
     uop.lrs2 := lreg
-    uop.lrs2_rtype := RT_FIX
+    uop.lrs2_rtype := Mux(is_fp, RT_FLT, RT_FIX)
+    uop.fp_val := is_fp
 
-    uop.fu_code := FUConstants.FU_MEM
-    uop.iq_type := IQT_MEM
+    uop.fu_code := Mux(is_fp, FUConstants.FU_F2IMEM, FUConstants.FU_MEM)
+    uop.iq_type := Mux(is_fp, IQT_FP, IQT_MEM)
     uop.uses_stq := true.B
     uop.mem_cmd := freechips.rocketchip.rocket.M_XWR
     uop.mem_size := 3.U
 
-    uop.inst := Cat(0.U(7.W), lreg, 0.U(5.W), 3.U(3.W), 0.U(5.W), "b0100011".U(7.W))
+    uop.inst := Cat(0.U(7.W), lreg, 0.U(5.W), 3.U(3.W), 0.U(5.W), Mux(is_fp, "b0100111".U(7.W), "b0100011".U(7.W)))
     uop.debug_inst := uop.inst
 
     uop
@@ -88,15 +95,14 @@ object CoroUopExpander
     val plan = Wire(Vec(width, Valid(new CoroExpansionStep)))
     val available = Wire(Vec(width + 1, UInt(width.W)))
     val context = Wire(Vec(width + 1, new SDMContextTag))
-    val valid = Wire(Vec(width + 1, UInt(state.coroNumIntRegisters.W)))
-    val dirty = Wire(Vec(width + 1, UInt(state.coroNumIntRegisters.W)))
+    val valid = Wire(Vec(width + 1, UInt(state.coroNumRegisters.W)))
+    val dirty = Wire(Vec(width + 1, UInt(state.coroNumRegisters.W)))
     val origin = Wire(Vec(width + 1, Valid(new MicroOp)))
-    val reg_bits = log2Ceil(state.coroNumIntRegisters)
 
     available(0) := VecInit(pending.map(_.valid)).asUInt
     context(0) := state.context
     valid(0) := state.valid
-    dirty(0) := state.dirty & ~1.U(state.coroNumIntRegisters.W)
+    dirty(0) := state.dirty & state.coroRegisterMask.U(state.coroNumRegisters.W)
     origin(0) := Mux(boundary.valid, boundary, last_origin)
 
     for (w <- 0 until width) {
@@ -105,20 +111,23 @@ object CoroUopExpander
       val same_context = sameContext(context(w), original.sdm.context)
       val force_restore = boundary.valid && boundary_type === CoroBoundaryType.RESTORE
       val save = !force_restore && (boundary.valid || !same_context) && dirty(w).orR
-      val save_lreg = PriorityEncoder(dirty(w))
+      val save_slot = PriorityEncoder(dirty(w))
       val source_valid = Mux(same_context, valid(w), 0.U)
-      val missing = ~source_valid & ((BigInt(1) << state.coroNumIntRegisters) - 2).U(state.coroNumIntRegisters.W)
-      val rs1 = original.lrs1(reg_bits - 1, 0)
-      val rs2 = original.lrs2(reg_bits - 1, 0)
-      val restore_rs1 = original.lrs1_rtype === RT_FIX && rs1 =/= 0.U && !source_valid(rs1)
-      val restore_rs2 = original.lrs2_rtype === RT_FIX && rs2 =/= 0.U && !source_valid(rs2)
+      val missing = ~source_valid & state.coroRegisterMask.U(state.coroNumRegisters.W)
+      val rs1 = SDMRegister.slot(original.lrs1_rtype, original.lrs1, state.enableSDMFP)
+      val rs2 = SDMRegister.slot(original.lrs2_rtype, original.lrs2, state.enableSDMFP)
+      val rs3 = SDMRegister.slot(RT_FLT, original.lrs3, state.enableSDMFP)
+      val restore_rs1 = SDMRegister.isValid(original.lrs1_rtype, original.lrs1, state.enableSDMFP) && !source_valid(rs1)
+      val restore_rs2 = SDMRegister.isValid(original.lrs2_rtype, original.lrs2, state.enableSDMFP) && !source_valid(rs2)
+      val restore_rs3 = state.enableSDMFP.B && original.frs3_en && !source_valid(rs3)
       val restore = !save && (force_restore ||
-        (original.sdm.context.is_coro && !original.exception && (restore_rs1 || restore_rs2)))
-      val restore_lreg = Mux(force_restore, PriorityEncoder(missing), Mux(restore_rs1, rs1, rs2))
+        (original.sdm.context.is_coro && !original.exception && (restore_rs1 || restore_rs2 || restore_rs3)))
+      val restore_slot = Mux(force_restore, PriorityEncoder(missing),
+        Mux(restore_rs1, rs1, Mux(restore_rs2, rs2, rs3)))
 
       plan(w).valid := Mux(boundary.valid, Mux(force_restore, missing.orR, dirty(w).orR), available(w).orR)
       plan(w).bits.use_original := !(save || restore)
-      plan(w).bits.uop := Mux(save, saveUop(origin(w).bits, save_lreg), restoreUop(original, restore_lreg))
+      plan(w).bits.uop := Mux(save, saveUop(origin(w).bits, save_slot), restoreUop(original, restore_slot))
       available(w + 1) := available(w) & ~Mux(save || restore, 0.U(width.W), oldest)
 
       when (enable && plan(w).valid && save) {
@@ -131,7 +140,7 @@ object CoroUopExpander
       update.setFromUop(Mux(save || restore, plan(w).bits.uop, original))
 
       val make_valid = update.op === CoroRegisterOp.WRITE || update.op === CoroRegisterOp.RESTORE
-      val reg_mask = Mux(update.lreg =/= 0.U, UIntToOH(update.lreg, state.coroNumIntRegisters), 0.U)
+      val reg_mask = UIntToOH(update.lreg, state.coroNumRegisters) & state.coroRegisterMask.U(state.coroNumRegisters.W)
       val prior_dirty = Mux(same_context, dirty(w), 0.U)
       context(w + 1) := Mux(plan(w).valid && !save, original.sdm.context, context(w))
       valid(w + 1) := Mux(plan(w).valid && !save,

@@ -339,9 +339,10 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       // internal restore can determine the physical address immediately after exp2
       if (enableSDM) {
         val uop = io.core.dis_uops(w).bits
-        when (uop.is_internal && uop.uopc === uopLD && uop.dst_rtype === RT_FIX) {
-          val reg_idx = uop.ldst(log2Ceil(coroNumIntRegisters) - 1, 0)
-          val addr = SDMFrame.address(io.core.coro_frame_base.bits, uop.sdm.context, reg_idx)
+        when (uop.is_internal && uop.uopc === uopLD &&
+          (uop.dst_rtype === RT_FIX || (enableSDMFP.B && uop.dst_rtype === RT_FLT))) {
+          val slot = SDMRegister.slot(uop.dst_rtype, uop.ldst, enableSDMFP)
+          val addr = SDMFrame.address(io.core.coro_frame_base.bits, uop.sdm.context, slot)
           val legal = edge.manager.findSafe(addr).reduce(_||_)
           // idk what this exactly means
           val cacheable = legal && !usingDataScratchpad.B &&
@@ -354,7 +355,7 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
 
           assert(io.core.coro_frame_base.valid, "restore requires a configured frame base")
           assert(addr(2, 0) === 0.U && uop.mem_size === 3.U, "restore must be an aligned 8-bytes load")
-          val full_addr = io.core.coro_frame_base.bits +& SDMFrame.offset(uop.sdm.context, reg_idx)
+          val full_addr = io.core.coro_frame_base.bits +& SDMFrame.offset(uop.sdm.context, slot)
           assert(!full_addr(corePAddrBits), "frame address exceeds the physical address width")
           assert(legal && edge.manager.fastProperty(addr, _.supportsGet.contains(coroRegisterBytes), (b: Boolean) => b.B),
             "restore frame must be readable physical memory")
@@ -376,9 +377,11 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       // internal save can determine the physical address immediately after exp2
       if (enableSDM) {
         val uop = io.core.dis_uops(w).bits
-        when (uop.is_internal && uop.uopc === uopSTD && uop.lrs2_rtype === RT_FIX) {
-          val reg_idx = uop.lrs2(log2Ceil(coroNumIntRegisters) - 1, 0)
-          val addr = SDMFrame.address(io.core.coro_frame_base.bits, uop.sdm.context, reg_idx)
+        val int_save = uop.uopc === uopSTD && uop.lrs2_rtype === RT_FIX
+        val fp_save = enableSDMFP.B && uop.uopc === uopSTA && uop.lrs2_rtype === RT_FLT
+        when (uop.is_internal && (int_save || fp_save)) {
+          val slot = SDMRegister.slot(uop.lrs2_rtype, uop.lrs2, enableSDMFP)
+          val addr = SDMFrame.address(io.core.coro_frame_base.bits, uop.sdm.context, slot)
 
           stq(st_enq_idx).bits.addr.valid := io.core.coro_frame_base.valid
           stq(st_enq_idx).bits.addr.bits := addr
@@ -386,7 +389,7 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
 
           assert(io.core.coro_frame_base.valid, "save requires a configured frame base")
           assert(addr(2, 0) === 0.U && uop.mem_size === 3.U, "save must be an aligned 8-bytes store")
-          val full_addr = io.core.coro_frame_base.bits +& SDMFrame.offset(uop.sdm.context, reg_idx)
+          val full_addr = io.core.coro_frame_base.bits +& SDMFrame.offset(uop.sdm.context, slot)
           assert(!full_addr(corePAddrBits), "frame address exceeds the physical address width")
           val legal = edge.manager.findSafe(addr).reduce(_||_)
           assert(legal && edge.manager.fastProperty(addr, _.supportsPutFull.contains(coroRegisterBytes), (b: Boolean) => b.B),
@@ -1549,10 +1552,19 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
     val selected = PriorityEncoderOH(free_lanes)
     for (w <- 0 until memWidth) {
       when (live && selected(w)) {
-        assert(entry.bits.uop.dst_rtype === RT_FIX && CoroLoadResult.isTracked(entry.bits.uop))
-        io.core.exe(w).iresp.valid := true.B
+        val send_iresp = entry.bits.uop.dst_rtype === RT_FIX
+        val send_fresp = enableSDMFP.B && entry.bits.uop.dst_rtype === RT_FLT
+
+        assert(send_iresp ^ send_fresp)
+        assert(entry.bits.uop.sdm.context.is_coro && !entry.bits.uop.is_internal &&
+          entry.bits.uop.uses_ldq && entry.bits.uop.mem_cmd === rocket.M_XRD)
+
+        io.core.exe(w).iresp.valid := send_iresp
         io.core.exe(w).iresp.bits.uop := UpdateBrMask(io.core.brupdate, entry.bits.uop)
         io.core.exe(w).iresp.bits.data := entry.bits.debug_wb_data
+        io.core.exe(w).fresp.valid := send_fresp
+        io.core.exe(w).fresp.bits.uop := UpdateBrMask(io.core.brupdate, entry.bits.uop)
+        io.core.exe(w).fresp.bits.data := entry.bits.debug_wb_data
         entry.bits.succeeded := true.B
         entry.bits.response_pending := false.B
       }

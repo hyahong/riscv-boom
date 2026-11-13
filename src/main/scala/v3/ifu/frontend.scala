@@ -265,7 +265,9 @@ class FetchBundle(implicit p: Parameters) extends BoomBundle
       for (i <- 0 until fetchWidth) {
         val inst = exp_insts(i)
         // not decoded yet, so check the binary
-        val is_load = inst(6, 0) === "b0000011".U && inst(14, 12) =/= "b111".U
+        val is_int_load = inst(6, 0) === "b0000011".U && inst(14, 12) =/= "b111".U
+        val is_fp_load = enableSDMFP.B && inst(6, 0) === "b0000111".U && inst(14, 12).isOneOf("b010".U, "b011".U)
+        val is_load = is_int_load || is_fp_load
         val valid = context.is_coro && mask(i) && is_load &&
           !xcpt_pf_if && !xcpt_ae_if && !bp_debug_if_oh(i) && !bp_xcpt_if_oh(i) &&
           predictions(i).load_prediction.valid

@@ -34,6 +34,22 @@ import freechips.rocketchip.util._
 import boom.v3.common._
 import boom.v3.util._
 
+class RobPerfEvents extends Bundle
+{
+  val load_stall     = Bool()
+  val other_stall    = Bool()
+  val restore_stall  = Bool()
+  val save_stall     = Bool()
+  val prefetch_stall = Bool()
+
+  def events: Seq[(String, () => Bool)] = Seq(
+    "ROB head load stall"     -> (() => load_stall),
+    "ROB head other stall"    -> (() => other_stall),
+    "ROB head restore stall"  -> (() => restore_stall),
+    "ROB head save stall"     -> (() => save_stall),
+    "ROB head prefetch stall" -> (() => prefetch_stall))
+}
+
 /**
  * IO bundle to interact with the ROB
  *
@@ -86,6 +102,7 @@ class RobIo(
 
   // Commit stage (free resources; also used for rollback).
   val commit = Output(new CommitSignals())
+  val perf = Output(new RobPerfEvents)
 
   // tell the LSU that the head of the ROB is a load
   // (some loads can only execute once they are at the head of the ROB).
@@ -576,7 +593,8 @@ class Rob(
   // Finally, don't throw an exception if there are instructions in front of
   // it that want to commit (only throw exception when head of the bundle).
 
-  var block_commit = (rob_state =/= s_normal) && (rob_state =/= s_wait_till_empty) || RegNext(exception_thrown) || RegNext(RegNext(exception_thrown))
+  val block_commit_global = (rob_state =/= s_normal) && (rob_state =/= s_wait_till_empty) || RegNext(exception_thrown) || RegNext(RegNext(exception_thrown))
+  var block_commit = block_commit_global
   var will_throw_exception = false.B
   var block_xcpt   = false.B
 
@@ -604,6 +622,21 @@ class Rob(
 
   val refetch_inst = exception_thrown || insn_sys_pc2epc
   val com_xcpt_uop = PriorityMux(rob_head_vals, io.commit.uops)
+
+  val head_stall = !reset.asBool && !block_commit_global && !io.csr_stall &&
+    rob_head_vals.asUInt.orR && !PriorityMux(rob_head_vals, can_commit) &&
+    !PriorityMux(rob_head_vals, can_throw_exception) && !will_commit.asUInt.orR &&
+    !io.flush.valid && !IsKilledByBranch(io.brupdate, com_xcpt_uop)
+  val head_restore = com_xcpt_uop.is_internal && com_xcpt_uop.uses_ldq
+  val head_save = com_xcpt_uop.is_internal && com_xcpt_uop.uses_stq
+  val head_prefetch = com_xcpt_uop.is_internal && !head_restore && !head_save
+  val head_regular = !com_xcpt_uop.is_internal
+  io.perf.load_stall     := head_stall && head_regular && com_xcpt_uop.uses_ldq
+  io.perf.other_stall    := head_stall && head_regular && !com_xcpt_uop.uses_ldq
+  io.perf.restore_stall  := head_stall && head_restore
+  io.perf.save_stall     := head_stall && head_save
+  io.perf.prefetch_stall := head_stall && head_prefetch
+
   io.head_load := 0.U.asTypeOf(io.head_load)
   if (enableSDM) {
     // head_load is valid if head uop is load and ...
